@@ -1,0 +1,14 @@
+build/
+out/
+.vs/
+.vscode/
+CMakeUserPresets.json
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+ipch/
+*.log
+*.tmp
+*.wav
+!SA3IPlug2Demo/resources/**/*.wav
