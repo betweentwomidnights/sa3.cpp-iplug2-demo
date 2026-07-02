@@ -84,6 +84,7 @@ public:
   , mPlugin(plugin)
   {
     SetTooltip("Embedded libsa3 test surface");
+    SetTextEntryLength(2048);
   }
 
   void Draw(IGraphics& g) override
@@ -873,6 +874,10 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   req.request.cfg_scale = 1.0f;
   req.request.duration_padding_sec = input.mode == RenderMode::Text ? 6.0f : 0.0f;
   req.request.keep_models = 1;
+  req.encode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
+  req.encode_overlap = input.mode == RenderMode::Text ? 0 : 32;
+  req.decode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
+  req.decode_overlap = input.mode == RenderMode::Text ? 0 : 32;
 
   struct ProgressUser { SA3IPlug2Demo* self; uint64_t requestId; } progressUser{this, requestId};
   req.request.user = &progressUser;
@@ -1010,4 +1015,3 @@ std::string SA3IPlug2Demo::NormalizeDroppedPath(const char* rawPath)
   }
   return path;
 }
-

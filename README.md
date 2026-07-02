@@ -16,13 +16,20 @@ The default CMake cache expects:
 
 - IPlug2 at `C:/dev/gary-in-the-plug/vendor/iPlug2`
 - `sa3.cpp` at `C:/dev/sa3.cpp`
-- a Release `sa3.cpp` build at `C:/dev/sa3.cpp/build`
+- a Release `sa3.cpp` build. It prefers `C:/dev/sa3.cpp/build-cuda` when present, then falls back to `C:/dev/sa3.cpp/build`.
+- CUDA runtime DLLs under `%CUDA_PATH%/bin` when using the CUDA `sa3.cpp` build.
 
 Configure and build with Visual Studio:
 
 ```powershell
 cmake -S C:\dev\sa3-iplug2-demo -B C:\dev\sa3-iplug2-demo\build -G "Visual Studio 17 2022" -A x64
 cmake --build C:\dev\sa3-iplug2-demo\build --config Release
+```
+
+To force a specific `libsa3` build:
+
+```powershell
+cmake -S C:\dev\sa3-iplug2-demo -B C:\dev\sa3-iplug2-demo\build -G "Visual Studio 17 2022" -A x64 -DSA3_BUILD_DIR=C:\dev\sa3.cpp\build-cuda
 ```
 
 Set `SA3_MODELS_DIR` at runtime to override the default model directory.

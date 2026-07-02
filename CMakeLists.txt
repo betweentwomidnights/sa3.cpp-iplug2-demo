@@ -6,7 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(IPLUG2_DIR "C:/dev/gary-in-the-plug/vendor/iPlug2" CACHE PATH "iPlug2 root directory")
 set(SA3_CPP_DIR "C:/dev/sa3.cpp" CACHE PATH "sa3.cpp repository root")
-set(SA3_BUILD_DIR "${SA3_CPP_DIR}/build" CACHE PATH "sa3.cpp build directory containing sa3.lib/sa3.dll")
+set(_SA3_DEFAULT_BUILD_DIR "${SA3_CPP_DIR}/build")
+if(EXISTS "${SA3_CPP_DIR}/build-cuda/Release/sa3.lib" AND EXISTS "${SA3_CPP_DIR}/build-cuda/bin/Release/ggml-cuda.dll")
+  set(_SA3_DEFAULT_BUILD_DIR "${SA3_CPP_DIR}/build-cuda")
+endif()
+set(SA3_BUILD_DIR "${_SA3_DEFAULT_BUILD_DIR}" CACHE PATH "sa3.cpp build directory containing sa3.lib/sa3.dll")
+if(DEFINED ENV{CUDA_PATH})
+  file(TO_CMAKE_PATH "$ENV{CUDA_PATH}" _SA3_CUDA_PATH)
+else()
+  set(_SA3_CUDA_PATH "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8")
+endif()
+set(SA3_CUDA_RUNTIME_DIR "${_SA3_CUDA_PATH}/bin" CACHE PATH "Optional CUDA runtime DLL directory")
 set(IPLUG_DEPLOY_PLUGINS OFF CACHE BOOL "Deploy built plugins to system directories" FORCE)
 
 include("${IPLUG2_DIR}/iPlug2.cmake")
@@ -23,5 +33,12 @@ file(GLOB SA3_RUNTIME_DLLS
   "${SA3_BUILD_DIR}/bin/Release/sa3.dll"
   "${SA3_BUILD_DIR}/bin/Release/ggml*.dll"
 )
+file(GLOB SA3_CUDA_RUNTIME_DLLS
+  "${SA3_CUDA_RUNTIME_DIR}/cudart64_*.dll"
+  "${SA3_CUDA_RUNTIME_DIR}/cublas64_*.dll"
+  "${SA3_CUDA_RUNTIME_DIR}/cublasLt64_*.dll"
+)
+list(APPEND SA3_RUNTIME_DLLS ${SA3_CUDA_RUNTIME_DLLS})
+list(REMOVE_DUPLICATES SA3_RUNTIME_DLLS)
 
 add_subdirectory(SA3IPlug2Demo)
