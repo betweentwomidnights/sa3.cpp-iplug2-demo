@@ -1,9 +1,9 @@
 #pragma once
 
 #define PLUG_NAME "SA3IPlug2Demo"
-#define PLUG_MFR "TheCollabagePatch"
-#define PLUG_VERSION_HEX 0x00010100
-#define PLUG_VERSION_STR "0.1.1"
+#define PLUG_MFR "the collabage patch"
+#define PLUG_VERSION_HEX 0x00010200
+#define PLUG_VERSION_STR "0.1.2"
 #define PLUG_UNIQUE_ID 'S3id'
 #define PLUG_MFR_ID 'Tcpa'
 #define PLUG_URL_STR "https://github.com/betweentwomidnights/sa3.cpp"
@@ -12,7 +12,7 @@
 #define PLUG_CLASS_NAME SA3IPlug2Demo
 
 #define BUNDLE_NAME "SA3IPlug2Demo"
-#define BUNDLE_MFR "TheCollabagePatch"
+#define BUNDLE_MFR "the collabage patch"
 #define BUNDLE_DOMAIN "com"
 
 #define SHARED_RESOURCES_SUBPATH "SA3IPlug2Demo"

@@ -4,11 +4,17 @@ Small IPlug2 experiment for validating `libsa3` embedded directly in a plugin.
 
 This repo intentionally stays separate from `gary-in-the-plug`. It reuses a few UI/audio-file helpers from that project, but the audio generation path calls `libsa3` in-process rather than going through HTTP.
 
+The demo keeps generated audio at its native `libsa3` sample rate for saving/dragging into a DAW, and creates a separate host-rate playback copy for auditioning inside the plug-in.
+
 ## Layout
 
 - `SA3IPlug2Demo/` contains the IPlug2 plugin/app target.
 - `SA3IPlug2Demo/DemoAudioFileStore.*` handles WAV/MP3 drop/load and WAV save/drag-out helpers.
 - `SA3IPlug2Demo/SA3IPlug2Demo.*` owns the UI, host-input capture, embedded `sa3_context`, and render worker.
+
+## LoRAs
+
+The UI can import `.gguf` LoRA files into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. `.ckpt` LoRA conversion is intentionally not handled in this demo yet; that helper should live in `libsa3`/`sa3.cpp` so other embedded hosts can use the same conversion path.
 
 ## Build
 

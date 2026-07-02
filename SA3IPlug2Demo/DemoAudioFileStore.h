@@ -29,10 +29,12 @@ std::string DocumentsDirectory(std::string* error = nullptr);
 std::string RecordingWavPath(std::string* error = nullptr);
 std::string OutputWavPath(std::string* error = nullptr);
 std::string OutputUndoWavPath(std::string* error = nullptr);
+std::string LoraDirectory(std::string* error = nullptr);
 
 AudioFileInfo SaveRecordingWav(const RecordingSnapshot& snapshot);
 AudioFileInfo SaveOutputWav(const RecordingSnapshot& snapshot);
 AudioFileInfo SaveOutputBase64Audio(const std::string& base64Audio);
+AudioFileInfo ImportLoraFile(const std::string& path);
 bool OutputUndoAvailable();
 AudioFileInfo RestoreOutputUndo();
 AudioFileInfo CreateOutputDragCopy();

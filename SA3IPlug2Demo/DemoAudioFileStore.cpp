@@ -36,6 +36,7 @@ constexpr const char* kRecordingFileName = "myBuffer.wav";
 constexpr const char* kOutputFileName = "myOutput.wav";
 constexpr const char* kOutputUndoFileName = "myOutput.undo.wav";
 constexpr const char* kDraggedAudioFolderName = "dragged_audio";
+constexpr const char* kLoraFolderName = "loras";
 
 std::string JoinPath(const std::string& left, const char* right)
 {
@@ -410,6 +411,12 @@ std::string ExtensionLower(const std::string& path)
   return ext;
 }
 
+std::string FileNameOnly(const std::string& path)
+{
+  const size_t slash = path.find_last_of("\\/");
+  return slash == std::string::npos ? path : path.substr(slash + 1u);
+}
+
 void FreeDrMp3Float(float* data)
 {
   drmp3_free(data, nullptr);
@@ -602,6 +609,19 @@ std::string OutputUndoWavPath(std::string* error)
   return documents.empty() ? std::string() : JoinPath(documents, kOutputUndoFileName);
 }
 
+std::string LoraDirectory(std::string* error)
+{
+  const std::string documents = DocumentsDirectory(error);
+  if (documents.empty())
+    return {};
+
+  const std::string loras = JoinPath(documents, kLoraFolderName);
+  if (!EnsureDirectoryExists(loras, error))
+    return {};
+
+  return loras;
+}
+
 std::string DraggedAudioDirectory(std::string* error = nullptr)
 {
   const std::string documents = DocumentsDirectory(error);
@@ -733,6 +753,63 @@ AudioFileInfo SaveOutputBase64Audio(const std::string& base64Audio)
   if (!info.ok)
     info.error = "output audio write completed but file is empty";
 
+  return info;
+}
+
+AudioFileInfo ImportLoraFile(const std::string& path)
+{
+  AudioFileInfo info;
+  info.path = path;
+  info.bytes = FileSizeBytes(path);
+
+  const std::string ext = ExtensionLower(path);
+  if (ext == "ckpt")
+  {
+    info.error = "ckpt LoRA conversion is not in libsa3 yet; import a gguf LoRA";
+    return info;
+  }
+  if (ext != "gguf")
+  {
+    info.error = "only gguf LoRA files can be imported";
+    return info;
+  }
+  if (info.bytes < 1)
+  {
+    info.error = "LoRA file is missing or empty";
+    return info;
+  }
+
+  std::string error;
+  const std::string loraDir = LoraDirectory(&error);
+  if (loraDir.empty())
+  {
+    info.error = error.empty() ? "LoRA folder unavailable" : error;
+    return info;
+  }
+
+  const std::string destination = JoinPath(loraDir, FileNameOnly(path).c_str());
+#if defined(_WIN32)
+  if (_stricmp(path.c_str(), destination.c_str()) == 0)
+#else
+  if (path == destination)
+#endif
+  {
+    info.path = destination;
+    info.ok = true;
+    return info;
+  }
+
+  if (!CopyFileBytes(path, destination, error))
+  {
+    info.error = std::string("LoRA copy failed: ") + error;
+    return info;
+  }
+
+  info.path = destination;
+  info.bytes = FileSizeBytes(destination);
+  info.ok = info.bytes > 0;
+  if (!info.ok)
+    info.error = "LoRA import completed but destination file is empty";
   return info;
 }
 

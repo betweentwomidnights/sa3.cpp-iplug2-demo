@@ -90,8 +90,8 @@ BEGIN
 END
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,1,0
-PRODUCTVERSION 0,1,1,0
+FILEVERSION 0,1,2,0
+PRODUCTVERSION 0,1,2,0
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS 0x1L
@@ -106,13 +106,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "FileVersion", "0.1.1"
-            VALUE "ProductVersion", "0.1.1"
+            VALUE "FileVersion", "0.1.2"
+            VALUE "ProductVersion", "0.1.2"
             VALUE "FileDescription", "SA3IPlug2Demo"
             VALUE "InternalName", "SA3IPlug2Demo"
             VALUE "ProductName", "SA3IPlug2Demo"
-            VALUE "CompanyName", "The Collabage Patch"
-            VALUE "LegalCopyright", "Copyright 2026 The Collabage Patch"
+            VALUE "CompanyName", "the collabage patch"
+            VALUE "LegalCopyright", "Copyright 2026 the collabage patch"
         END
     END
     BLOCK "VarFileInfo"

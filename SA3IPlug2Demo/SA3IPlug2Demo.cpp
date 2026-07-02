@@ -11,9 +11,11 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <commdlg.h>
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -214,18 +216,35 @@ class SA3DemoControl final : public IControl
   {
     None,
     Prompt,
-    DurationMinus,
-    DurationPlus,
-    StepsMinus,
-    StepsPlus,
-    NoiseMinus,
-    NoisePlus,
-    Generate,
-    Transform,
-    Continue,
+    TabGenerate,
+    TabTransform,
+    TabContinue,
+    DurationSlider,
+    StepsSlider,
+    NoiseSlider,
+    Run,
+    AddLora,
+    LoraToggle,
+    LoraRemove,
+    LoraSlider,
     OutputPlay,
     OutputStop,
     OutputSave
+  };
+
+  enum class Slider
+  {
+    None,
+    Duration,
+    Steps,
+    Noise,
+    Lora
+  };
+
+  struct HitResult
+  {
+    Hit hit = Hit::None;
+    size_t index = 0;
   };
 
 public:
@@ -248,52 +267,46 @@ public:
 
     const float left = shell.L + 18.f;
     const float right = shell.R - 18.f;
-    float y = shell.T + 18.f;
+    float y = shell.T + 14.f;
+    const SA3IPlug2Demo::RenderMode mode = mPlugin.CurrentRenderMode();
 
     g.DrawText(IText(20.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               "sa3 embedded", IRECT(left, y, shell.MW(), y + 28.f));
+               "sa3 embedded", IRECT(left, y, shell.MW(), y + 26.f));
     g.DrawText(IText(12.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               mPlugin.ModelsDir().c_str(), IRECT(shell.MW(), y, right, y + 28.f));
-    y += 34.f;
+               mPlugin.ModelsDir().c_str(), IRECT(shell.MW(), y, right, y + 26.f));
+    y += 30.f;
 
     const float progress = std::clamp(mPlugin.Progress(), 0.f, 1.f);
-    const IRECT statusRect(left, y, right, y + 24.f);
+    const IRECT statusRect(left, y, right, y + 22.f);
     g.FillRoundRect(PanelDark(), statusRect, 3.f);
     if (mPlugin.Busy())
       g.FillRoundRect(RedDim(), IRECT(statusRect.L, statusRect.T, statusRect.L + statusRect.W() * progress, statusRect.B), 3.f);
     g.DrawRoundRect(FrameSoft(), statusRect, 3.f);
     g.DrawText(IText(12.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
                CompactText(mPlugin.StatusText(), 96).c_str(), statusRect.GetPadded(-8.f));
-    y += 36.f;
+    y += 30.f;
 
-    g.DrawText(IText(12.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
-               "prompt", IRECT(left, y, left + 80.f, y + 18.f));
-    mPromptRect = IRECT(left, y + 20.f, right, y + 52.f);
-    g.FillRoundRect(ButtonFill(), mPromptRect, 3.f);
-    g.DrawRoundRect(Frame(), mPromptRect, 3.f);
-    g.DrawText(IText(13.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(mPlugin.Prompt(), 118).c_str(), mPromptRect.GetPadded(-8.f));
-    y += 66.f;
+    const IRECT sourceRect(left, y, right, y + 112.f);
+    DrawWaveformPanel(g, sourceRect, "source", mPlugin.SourceStatusText(), mPlugin.SourceWaveform((int)sourceRect.W()), false);
+    y += 122.f;
 
-    DrawKnobRow(g, IRECT(left, y, right, y + 34.f));
-    y += 48.f;
+    DrawTabs(g, IRECT(left, y, right, y + 30.f), mode);
+    y += 40.f;
 
-    mGenerateRect = IRECT(left, y, left + 150.f, y + 34.f);
-    mTransformRect = IRECT(mGenerateRect.R + 10.f, y, mGenerateRect.R + 160.f, y + 34.f);
-    mContinueRect = IRECT(mTransformRect.R + 10.f, y, mTransformRect.R + 160.f, y + 34.f);
-    DrawButton(g, mGenerateRect, "generate", kDemoFont, false, !mPlugin.Busy());
-    DrawButton(g, mTransformRect, "transform", kDemoFont, false, !mPlugin.Busy());
-    DrawButton(g, mContinueRect, "continue", kDemoFont, false, !mPlugin.Busy());
+    DrawPrompt(g, IRECT(left, y, right, y + 48.f), mode);
+    y += 56.f;
+
+    y = DrawModeControls(g, IRECT(left, y, right, y + 72.f), mode) + 8.f;
+    y = DrawLoraPanel(g, IRECT(left, y, right, y + 82.f)) + 8.f;
+
+    mRunRect = IRECT(left, y, left + 180.f, y + 32.f);
+    DrawButton(g, mRunRect, ActionLabel(mode), kDemoFont, false, !mPlugin.Busy());
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
                mPlugin.TransportRunning() ? "host rolling: recording input" : "host stopped",
-               IRECT(mContinueRect.R + 10.f, y, right, y + 34.f));
-    y += 50.f;
+               IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
+    y += 42.f;
 
-    const IRECT sourceRect(left, y, right, y + 150.f);
-    DrawWaveformPanel(g, sourceRect, "source", mPlugin.SourceStatusText(), mPlugin.SourceWaveform((int)sourceRect.W()), false);
-    y += 164.f;
-
-    const IRECT outputRect(left, y, right, shell.B - 16.f);
+    const IRECT outputRect(left, y, right, shell.B - 14.f);
     DrawOutputPanel(g, outputRect);
   }
 
@@ -303,26 +316,36 @@ public:
     mOutputDragStarted = false;
     mOutputDragStartX = x;
     mOutputDragStartY = y;
+    mActiveSlider = Slider::None;
 
-    const Hit hit = HitTest(x, y);
-    switch (hit)
+    const HitResult hit = HitTest(x, y);
+    switch (hit.hit)
     {
       case Hit::Prompt:
+      {
+        const auto mode = mPlugin.CurrentRenderMode();
         if (GetUI())
-          GetUI()->CreateTextEntry(*this, IText(14.f, COLOR_WHITE, kDemoFont), mPromptRect, mPlugin.Prompt().c_str(), 1);
+          GetUI()->CreateTextEntry(*this,
+                                   IText(14.f, COLOR_WHITE, kDemoFont),
+                                   mPromptRect,
+                                   mPlugin.PromptForMode(mode).c_str(),
+                                   PromptEntryIndex(mode));
         return;
-      case Hit::DurationMinus: mPlugin.AdjustDuration(-1); SetDirty(false); return;
-      case Hit::DurationPlus:  mPlugin.AdjustDuration(1);  SetDirty(false); return;
-      case Hit::StepsMinus:    mPlugin.AdjustSteps(-1);    SetDirty(false); return;
-      case Hit::StepsPlus:     mPlugin.AdjustSteps(1);     SetDirty(false); return;
-      case Hit::NoiseMinus:    mPlugin.AdjustInitNoise(-0.05f); SetDirty(false); return;
-      case Hit::NoisePlus:     mPlugin.AdjustInitNoise(0.05f);  SetDirty(false); return;
-      case Hit::Generate:      mPlugin.StartRender(SA3IPlug2Demo::RenderMode::Text); SetDirty(false); return;
-      case Hit::Transform:     mPlugin.StartRender(SA3IPlug2Demo::RenderMode::Transform); SetDirty(false); return;
-      case Hit::Continue:      mPlugin.StartRender(SA3IPlug2Demo::RenderMode::Continue); SetDirty(false); return;
-      case Hit::OutputPlay:    mPlugin.ToggleOutputPlayback(); SetDirty(false); return;
-      case Hit::OutputStop:    mPlugin.StopOutputPlayback(); SetDirty(false); return;
-      case Hit::OutputSave:    mPlugin.SaveOutputToDisk(); SetDirty(false); return;
+      }
+      case Hit::TabGenerate:  mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Text); SetDirty(false); return;
+      case Hit::TabTransform: mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Transform); SetDirty(false); return;
+      case Hit::TabContinue:  mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Continue); SetDirty(false); return;
+      case Hit::DurationSlider: mActiveSlider = Slider::Duration; UpdateSliderFromX(x); return;
+      case Hit::StepsSlider:    mActiveSlider = Slider::Steps;    UpdateSliderFromX(x); return;
+      case Hit::NoiseSlider:    mActiveSlider = Slider::Noise;    UpdateSliderFromX(x); return;
+      case Hit::LoraSlider:     mActiveSlider = Slider::Lora; mActiveLoraIndex = hit.index; UpdateSliderFromX(x); return;
+      case Hit::LoraToggle:     ToggleLora(hit.index); SetDirty(false); return;
+      case Hit::LoraRemove:     mPlugin.RemoveLora(hit.index); SetDirty(false); return;
+      case Hit::AddLora:        mPlugin.ImportLoraFromDialog(); SetDirty(false); return;
+      case Hit::Run:            mPlugin.StartRender(mPlugin.CurrentRenderMode()); SetDirty(false); return;
+      case Hit::OutputPlay:     mPlugin.ToggleOutputPlayback(); SetDirty(false); return;
+      case Hit::OutputStop:     mPlugin.StopOutputPlayback(); SetDirty(false); return;
+      case Hit::OutputSave:     mPlugin.SaveOutputToDisk(); SetDirty(false); return;
       case Hit::None: break;
     }
 
@@ -338,6 +361,12 @@ public:
 
   void OnMouseDrag(float x, float y, float dX, float dY, const IMouseMod& mod) override
   {
+    if (mActiveSlider != Slider::None)
+    {
+      UpdateSliderFromX(x);
+      return;
+    }
+
     if (mOutputPointerDown)
     {
       const float dx = x - mOutputDragStartX;
@@ -358,6 +387,13 @@ public:
 
   void OnMouseUp(float x, float y, const IMouseMod& mod) override
   {
+    if (mActiveSlider != Slider::None)
+    {
+      mActiveSlider = Slider::None;
+      SetDirty(false);
+      return;
+    }
+
     if (mOutputPointerDown && !mOutputDragStarted && mOutputWaveformRect.Contains(x, y))
     {
       const float rel = std::clamp(x - mOutputWaveformRect.L, 0.f, std::max(1.f, mOutputWaveformRect.W()));
@@ -387,58 +423,246 @@ public:
 
   void OnTextEntryCompletion(const char* str, int valIdx) override
   {
-    if (valIdx == 1)
-      mPlugin.SetPrompt(str);
+    switch (valIdx)
+    {
+      case 1: mPlugin.SetPromptForMode(SA3IPlug2Demo::RenderMode::Text, str); break;
+      case 2: mPlugin.SetPromptForMode(SA3IPlug2Demo::RenderMode::Transform, str); break;
+      case 3: mPlugin.SetPromptForMode(SA3IPlug2Demo::RenderMode::Continue, str); break;
+      default: break;
+    }
     SetDirty(false);
   }
 
 private:
-  Hit HitTest(float x, float y) const
+  static const char* ActionLabel(SA3IPlug2Demo::RenderMode mode)
   {
-    if (mPromptRect.Contains(x, y)) return Hit::Prompt;
-    if (mDurationMinusRect.Contains(x, y)) return Hit::DurationMinus;
-    if (mDurationPlusRect.Contains(x, y)) return Hit::DurationPlus;
-    if (mStepsMinusRect.Contains(x, y)) return Hit::StepsMinus;
-    if (mStepsPlusRect.Contains(x, y)) return Hit::StepsPlus;
-    if (mNoiseMinusRect.Contains(x, y)) return Hit::NoiseMinus;
-    if (mNoisePlusRect.Contains(x, y)) return Hit::NoisePlus;
-    if (mGenerateRect.Contains(x, y)) return Hit::Generate;
-    if (mTransformRect.Contains(x, y)) return Hit::Transform;
-    if (mContinueRect.Contains(x, y)) return Hit::Continue;
-    if (mOutputPlayRect.Contains(x, y)) return Hit::OutputPlay;
-    if (mOutputStopRect.Contains(x, y)) return Hit::OutputStop;
-    if (mOutputSaveRect.Contains(x, y)) return Hit::OutputSave;
-    return Hit::None;
+    switch (mode)
+    {
+      case SA3IPlug2Demo::RenderMode::Text: return "generate";
+      case SA3IPlug2Demo::RenderMode::Transform: return "transform";
+      case SA3IPlug2Demo::RenderMode::Continue: return "continue";
+    }
+    return "generate";
   }
 
-  void DrawStepper(IGraphics& g, const IRECT& bounds, const char* label, const char* value,
-                   IRECT& minusRect, IRECT& plusRect)
+  static int PromptEntryIndex(SA3IPlug2Demo::RenderMode mode)
+  {
+    switch (mode)
+    {
+      case SA3IPlug2Demo::RenderMode::Text: return 1;
+      case SA3IPlug2Demo::RenderMode::Transform: return 2;
+      case SA3IPlug2Demo::RenderMode::Continue: return 3;
+    }
+    return 1;
+  }
+
+  HitResult HitTest(float x, float y) const
+  {
+    if (mPromptRect.Contains(x, y)) return {Hit::Prompt, 0};
+    if (mGenerateTabRect.Contains(x, y)) return {Hit::TabGenerate, 0};
+    if (mTransformTabRect.Contains(x, y)) return {Hit::TabTransform, 0};
+    if (mContinueTabRect.Contains(x, y)) return {Hit::TabContinue, 0};
+    if (mDurationSliderRect.Contains(x, y)) return {Hit::DurationSlider, 0};
+    if (mStepsSliderRect.Contains(x, y)) return {Hit::StepsSlider, 0};
+    if (mNoiseSliderRect.Contains(x, y)) return {Hit::NoiseSlider, 0};
+    for (size_t i = 0; i < mLoraSliderRects.size(); ++i)
+      if (mLoraSliderRects[i].Contains(x, y)) return {Hit::LoraSlider, i};
+    for (size_t i = 0; i < mLoraToggleRects.size(); ++i)
+      if (mLoraToggleRects[i].Contains(x, y)) return {Hit::LoraToggle, i};
+    for (size_t i = 0; i < mLoraRemoveRects.size(); ++i)
+      if (mLoraRemoveRects[i].Contains(x, y)) return {Hit::LoraRemove, i};
+    if (mAddLoraRect.Contains(x, y)) return {Hit::AddLora, 0};
+    if (mRunRect.Contains(x, y)) return {Hit::Run, 0};
+    if (mOutputPlayRect.Contains(x, y)) return {Hit::OutputPlay, 0};
+    if (mOutputStopRect.Contains(x, y)) return {Hit::OutputStop, 0};
+    if (mOutputSaveRect.Contains(x, y)) return {Hit::OutputSave, 0};
+    return {};
+  }
+
+  void DrawTab(IGraphics& g, const IRECT& bounds, const char* label, bool active)
   {
     using namespace gary::ui;
-    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle), label, IRECT(bounds.L, bounds.T, bounds.L + 92.f, bounds.B));
-    minusRect = IRECT(bounds.L + 96.f, bounds.T + 2.f, bounds.L + 122.f, bounds.B - 2.f);
-    plusRect = IRECT(bounds.R - 26.f, bounds.T + 2.f, bounds.R, bounds.B - 2.f);
-    const IRECT valueRect(minusRect.R + 4.f, bounds.T + 2.f, plusRect.L - 4.f, bounds.B - 2.f);
-    DrawButton(g, minusRect, "-", kDemoFont, false);
-    DrawButton(g, plusRect, "+", kDemoFont, false);
-    g.FillRoundRect(PanelDark(), valueRect, 3.f);
-    g.DrawRoundRect(FrameSoft(), valueRect, 3.f);
-    g.DrawText(IText(13.f, COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle), value, valueRect);
+    g.FillRoundRect(active ? Red() : ButtonFill(), bounds, 4.f);
+    g.DrawRoundRect(active ? Red() : Frame(), bounds, 4.f);
+    g.DrawText(IText(13.f, active ? COLOR_BLACK : COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle),
+               label, bounds.GetPadded(-4.f));
   }
 
-  void DrawKnobRow(IGraphics& g, const IRECT& bounds)
+  void DrawTabs(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)
   {
-    char dur[32] = {};
-    char steps[32] = {};
-    char noise[32] = {};
-    std::snprintf(dur, sizeof(dur), "%ds", mPlugin.DurationSeconds());
-    std::snprintf(steps, sizeof(steps), "%d", mPlugin.Steps());
-    std::snprintf(noise, sizeof(noise), "%.2f", mPlugin.InitNoiseLevel());
-    const float gap = 12.f;
-    const float w = (bounds.W() - 2.f * gap) / 3.f;
-    DrawStepper(g, IRECT(bounds.L, bounds.T, bounds.L + w, bounds.B), "duration", dur, mDurationMinusRect, mDurationPlusRect);
-    DrawStepper(g, IRECT(bounds.L + w + gap, bounds.T, bounds.L + 2.f * w + gap, bounds.B), "steps", steps, mStepsMinusRect, mStepsPlusRect);
-    DrawStepper(g, IRECT(bounds.L + 2.f * (w + gap), bounds.T, bounds.R, bounds.B), "init noise", noise, mNoiseMinusRect, mNoisePlusRect);
+    const float gap = 8.f;
+    const float w = (bounds.W() - gap * 2.f) / 3.f;
+    mGenerateTabRect = IRECT(bounds.L, bounds.T, bounds.L + w, bounds.B);
+    mTransformTabRect = IRECT(mGenerateTabRect.R + gap, bounds.T, mGenerateTabRect.R + gap + w, bounds.B);
+    mContinueTabRect = IRECT(mTransformTabRect.R + gap, bounds.T, bounds.R, bounds.B);
+    DrawTab(g, mGenerateTabRect, "generate", mode == SA3IPlug2Demo::RenderMode::Text);
+    DrawTab(g, mTransformTabRect, "transform", mode == SA3IPlug2Demo::RenderMode::Transform);
+    DrawTab(g, mContinueTabRect, "continue", mode == SA3IPlug2Demo::RenderMode::Continue);
+  }
+
+  void DrawPrompt(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)
+  {
+    using namespace gary::ui;
+    g.DrawText(IText(12.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               "prompt", IRECT(bounds.L, bounds.T, bounds.L + 80.f, bounds.T + 16.f));
+    mPromptRect = IRECT(bounds.L, bounds.T + 18.f, bounds.R, bounds.B);
+    g.FillRoundRect(ButtonFill(), mPromptRect, 3.f);
+    g.DrawRoundRect(Frame(), mPromptRect, 3.f);
+    g.DrawText(IText(13.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
+               CompactText(mPlugin.PromptForMode(mode), 118).c_str(), mPromptRect.GetPadded(-8.f));
+  }
+
+  float SliderFraction(float value, float minValue, float maxValue) const
+  {
+    return std::clamp((value - minValue) / std::max(0.0001f, maxValue - minValue), 0.f, 1.f);
+  }
+
+  void DrawSlider(IGraphics& g, const IRECT& bounds, const char* label, const char* valueText,
+                  float value, float minValue, float maxValue, IRECT& sliderRect)
+  {
+    using namespace gary::ui;
+    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               label, IRECT(bounds.L, bounds.T, bounds.L + 86.f, bounds.B));
+    g.DrawText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Far, EVAlign::Middle),
+               valueText, IRECT(bounds.R - 58.f, bounds.T, bounds.R, bounds.B));
+
+    sliderRect = IRECT(bounds.L + 92.f, bounds.MH() - 8.f, bounds.R - 66.f, bounds.MH() + 8.f);
+    const IRECT track(sliderRect.L, sliderRect.MH() - 2.f, sliderRect.R, sliderRect.MH() + 2.f);
+    g.FillRoundRect(FrameSoft(), track, 2.f);
+    const float filled = sliderRect.L + sliderRect.W() * SliderFraction(value, minValue, maxValue);
+    g.FillRoundRect(Red(), IRECT(track.L, track.T, filled, track.B), 2.f);
+    g.FillCircle(COLOR_WHITE, filled, sliderRect.MH(), 6.f);
+  }
+
+  float DrawModeControls(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)
+  {
+    mDurationSliderRect = {};
+    mNoiseSliderRect = {};
+    float y = bounds.T;
+
+    char value[32] = {};
+    if (mode == SA3IPlug2Demo::RenderMode::Transform)
+    {
+      std::snprintf(value, sizeof value, "%.2f", mPlugin.InitNoiseLevel());
+      DrawSlider(g, IRECT(bounds.L, y, bounds.R, y + 26.f), "init noise", value,
+                 mPlugin.InitNoiseLevel(), 0.01f, 1.0f, mNoiseSliderRect);
+      y += 32.f;
+    }
+    else
+    {
+      std::snprintf(value, sizeof value, "%ds", mPlugin.DurationSeconds());
+      DrawSlider(g, IRECT(bounds.L, y, bounds.R, y + 26.f),
+                 mode == SA3IPlug2Demo::RenderMode::Continue ? "total" : "duration",
+                 value, (float)mPlugin.DurationSeconds(), 1.f, 300.f, mDurationSliderRect);
+      y += 32.f;
+    }
+
+    std::snprintf(value, sizeof value, "%d", mPlugin.Steps());
+    DrawSlider(g, IRECT(bounds.L, y, bounds.R, y + 26.f), "steps", value,
+               (float)mPlugin.Steps(), 1.f, 64.f, mStepsSliderRect);
+    return y + 26.f;
+  }
+
+  float DrawLoraPanel(IGraphics& g, const IRECT& bounds)
+  {
+    using namespace gary::ui;
+    mAddLoraRect = {};
+    mLoraToggleRects.clear();
+    mLoraRemoveRects.clear();
+    mLoraSliderRects.clear();
+
+    const std::vector<SA3IPlug2Demo::LoraSlot> loras = mPlugin.Loras();
+    g.FillRoundRect(PanelDark(), bounds, 4.f);
+    g.DrawRoundRect(FrameSoft(), bounds, 4.f);
+
+    const float left = bounds.L + 10.f;
+    const float right = bounds.R - 10.f;
+    float y = bounds.T + 8.f;
+    g.DrawText(IText(12.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
+               "loras", IRECT(left, y, left + 80.f, y + 20.f));
+    mAddLoraRect = IRECT(right - 86.f, y, right, y + 22.f);
+    DrawButton(g, mAddLoraRect, "add lora", kDemoFont);
+    y += 28.f;
+
+    if (loras.empty())
+    {
+      g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+                 "no gguf loras imported", IRECT(left, y, right, y + 22.f));
+      return bounds.B;
+    }
+
+    const size_t rowCount = std::min<size_t>(loras.size(), 2);
+    for (size_t i = 0; i < rowCount; ++i)
+    {
+      const auto& lora = loras[i];
+      IRECT row(left, y, right, y + 22.f);
+      IRECT toggle(row.L, row.T + 2.f, row.L + 18.f, row.B - 2.f);
+      IRECT remove(row.R - 24.f, row.T, row.R, row.B);
+      IRECT slider(row.R - 154.f, row.T + 3.f, row.R - 34.f, row.B - 3.f);
+      IRECT label(toggle.R + 6.f, row.T, slider.L - 8.f, row.B);
+
+      mLoraToggleRects.push_back(toggle);
+      mLoraRemoveRects.push_back(remove);
+      mLoraSliderRects.push_back(slider);
+
+      g.DrawRoundRect(lora.enabled ? Red() : Frame(), toggle, 2.f);
+      if (lora.enabled)
+        g.FillRoundRect(Red(), toggle.GetPadded(-4.f), 1.f);
+      g.DrawText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
+                 CompactText(lora.name, 28).c_str(), label);
+
+      const IRECT track(slider.L, slider.MH() - 2.f, slider.R, slider.MH() + 2.f);
+      const float filled = slider.L + slider.W() * SliderFraction(lora.strength, 0.f, 2.f);
+      g.FillRoundRect(FrameSoft(), track, 2.f);
+      g.FillRoundRect(Red(), IRECT(track.L, track.T, filled, track.B), 2.f);
+      g.FillCircle(COLOR_WHITE, filled, slider.MH(), 5.f);
+
+      char value[24] = {};
+      std::snprintf(value, sizeof value, "%.2f", lora.strength);
+      g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle), value, IRECT(slider.L, row.B - 2.f, slider.R, row.B + 12.f));
+      DrawButton(g, remove, "x", kDemoFont);
+      y += 26.f;
+    }
+
+    if (loras.size() > rowCount)
+      g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+                 "+ more loras queued", IRECT(left, y, right, y + 14.f));
+
+    return bounds.B;
+  }
+
+  void UpdateSliderFromX(float x)
+  {
+    auto fraction = [](const IRECT& r, float px) {
+      return std::clamp((px - r.L) / std::max(1.f, r.W()), 0.f, 1.f);
+    };
+
+    switch (mActiveSlider)
+    {
+      case Slider::Duration:
+        mPlugin.SetDurationSeconds((int)std::llround(1.f + fraction(mDurationSliderRect, x) * 299.f));
+        break;
+      case Slider::Steps:
+        mPlugin.SetSteps((int)std::llround(1.f + fraction(mStepsSliderRect, x) * 63.f));
+        break;
+      case Slider::Noise:
+        mPlugin.SetInitNoiseLevel(0.01f + fraction(mNoiseSliderRect, x) * 0.99f);
+        break;
+      case Slider::Lora:
+        if (mActiveLoraIndex < mLoraSliderRects.size())
+          mPlugin.SetLoraStrength(mActiveLoraIndex, fraction(mLoraSliderRects[mActiveLoraIndex], x) * 2.f);
+        break;
+      case Slider::None:
+        break;
+    }
+    SetDirty(false);
+  }
+
+  void ToggleLora(size_t index)
+  {
+    const auto loras = mPlugin.Loras();
+    if (index < loras.size())
+      mPlugin.SetLoraEnabled(index, !loras[index].enabled);
   }
 
   void DrawWaveform(IGraphics& g, const IRECT& bounds, const SA3IPlug2Demo::Waveform& wf, const IColor& color)
@@ -504,11 +728,15 @@ private:
 
   SA3IPlug2Demo& mPlugin;
   IRECT mPromptRect;
-  IRECT mDurationMinusRect, mDurationPlusRect;
-  IRECT mStepsMinusRect, mStepsPlusRect;
-  IRECT mNoiseMinusRect, mNoisePlusRect;
-  IRECT mGenerateRect, mTransformRect, mContinueRect;
+  IRECT mGenerateTabRect, mTransformTabRect, mContinueTabRect;
+  IRECT mDurationSliderRect, mStepsSliderRect, mNoiseSliderRect;
+  IRECT mRunRect, mAddLoraRect;
+  std::vector<IRECT> mLoraToggleRects;
+  std::vector<IRECT> mLoraRemoveRects;
+  std::vector<IRECT> mLoraSliderRects;
   IRECT mOutputWaveformRect, mOutputPlayRect, mOutputStopRect, mOutputSaveRect;
+  Slider mActiveSlider = Slider::None;
+  size_t mActiveLoraIndex = 0;
   bool mOutputPointerDown = false;
   bool mOutputDragStarted = false;
   float mOutputDragStartX = 0.f;
@@ -521,6 +749,7 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
 {
   GetParam(kStatusParam)->InitDouble("Status", 0., 0., 1., 1., "");
   ResizeRecordBuffer(44100.0);
+  mHostSampleRate.store(44100, std::memory_order_release);
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
@@ -537,6 +766,17 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
 #endif
 }
 
+int SA3IPlug2Demo::ModeIndex(RenderMode mode) noexcept
+{
+  switch (mode)
+  {
+    case RenderMode::Text: return 0;
+    case RenderMode::Transform: return 1;
+    case RenderMode::Continue: return 2;
+  }
+  return 0;
+}
+
 SA3IPlug2Demo::~SA3IPlug2Demo()
 {
   StopWorker();
@@ -551,7 +791,13 @@ SA3IPlug2Demo::~SA3IPlug2Demo()
 #if IPLUG_DSP
 void SA3IPlug2Demo::OnReset()
 {
-  ResizeRecordBuffer(GetSampleRate());
+  const int hostRate = std::max(1, (int)(GetSampleRate() + 0.5));
+  mHostSampleRate.store(hostRate, std::memory_order_release);
+  ResizeRecordBuffer(hostRate);
+  {
+    std::lock_guard<std::mutex> lock(mOutputMutex);
+    RebuildOutputPlaybackBufferLocked(hostRate);
+  }
   mWasTransportRunning = false;
 }
 
@@ -596,14 +842,24 @@ void SA3IPlug2Demo::OnIdle()
 
 void SA3IPlug2Demo::SetPrompt(const char* text)
 {
+  SetPromptForMode(CurrentRenderMode(), text);
+}
+
+void SA3IPlug2Demo::SetPromptForMode(RenderMode mode, const char* text)
+{
   std::lock_guard<std::mutex> lock(mPromptMutex);
-  mPrompt = text && *text ? text : "";
+  mPrompts[(size_t)ModeIndex(mode)] = text && *text ? text : "";
 }
 
 std::string SA3IPlug2Demo::Prompt() const
 {
+  return PromptForMode(CurrentRenderMode());
+}
+
+std::string SA3IPlug2Demo::PromptForMode(RenderMode mode) const
+{
   std::lock_guard<std::mutex> lock(mPromptMutex);
-  return mPrompt;
+  return mPrompts[(size_t)ModeIndex(mode)];
 }
 
 std::string SA3IPlug2Demo::StatusText() const
@@ -631,22 +887,49 @@ std::string SA3IPlug2Demo::ModelsDir() const
   return SA3_DEMO_DEFAULT_MODELS_DIR;
 }
 
+void SA3IPlug2Demo::SetCurrentRenderMode(RenderMode mode)
+{
+  mCurrentMode.store(ModeIndex(mode), std::memory_order_release);
+}
+
+SA3IPlug2Demo::RenderMode SA3IPlug2Demo::CurrentRenderMode() const noexcept
+{
+  switch (mCurrentMode.load(std::memory_order_acquire))
+  {
+    case 1: return RenderMode::Transform;
+    case 2: return RenderMode::Continue;
+    default: return RenderMode::Text;
+  }
+}
+
 void SA3IPlug2Demo::AdjustDuration(int deltaSeconds)
 {
-  const int next = std::clamp(mDurationSeconds.load(std::memory_order_acquire) + deltaSeconds, 1, 300);
-  mDurationSeconds.store(next, std::memory_order_release);
+  SetDurationSeconds(mDurationSeconds.load(std::memory_order_acquire) + deltaSeconds);
 }
 
 void SA3IPlug2Demo::AdjustSteps(int deltaSteps)
 {
-  const int next = std::clamp(mSteps.load(std::memory_order_acquire) + deltaSteps, 1, 64);
-  mSteps.store(next, std::memory_order_release);
+  SetSteps(mSteps.load(std::memory_order_acquire) + deltaSteps);
 }
 
 void SA3IPlug2Demo::AdjustInitNoise(float delta)
 {
-  const float next = std::clamp(mInitNoiseLevel.load(std::memory_order_acquire) + delta, 0.01f, 1.0f);
-  mInitNoiseLevel.store(next, std::memory_order_release);
+  SetInitNoiseLevel(mInitNoiseLevel.load(std::memory_order_acquire) + delta);
+}
+
+void SA3IPlug2Demo::SetDurationSeconds(int seconds)
+{
+  mDurationSeconds.store(std::clamp(seconds, 1, 300), std::memory_order_release);
+}
+
+void SA3IPlug2Demo::SetSteps(int steps)
+{
+  mSteps.store(std::clamp(steps, 1, 64), std::memory_order_release);
+}
+
+void SA3IPlug2Demo::SetInitNoiseLevel(float level)
+{
+  mInitNoiseLevel.store(std::clamp(level, 0.01f, 1.0f), std::memory_order_release);
 }
 
 void SA3IPlug2Demo::StartRender(RenderMode mode)
@@ -750,9 +1033,77 @@ gary::AudioFileInfo SA3IPlug2Demo::CreateOutputDragCopy()
   return info;
 }
 
+bool SA3IPlug2Demo::ImportLoraFromDialog()
+{
+#ifdef _WIN32
+  char fileName[MAX_PATH] = {};
+  OPENFILENAMEA ofn = {};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = nullptr;
+  ofn.lpstrFilter = "SA3 LoRA (*.gguf;*.ckpt)\0*.gguf;*.ckpt\0GGUF LoRA (*.gguf)\0*.gguf\0Checkpoint LoRA (*.ckpt)\0*.ckpt\0All files\0*.*\0";
+  ofn.lpstrFile = fileName;
+  ofn.nMaxFile = MAX_PATH;
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  ofn.lpstrTitle = "Import SA3 LoRA";
+
+  if (!GetOpenFileNameA(&ofn))
+    return false;
+
+  const auto info = gary::ImportLoraFile(fileName);
+  if (!info.ok)
+  {
+    SetStatus(std::string("LoRA import failed: ") + info.error);
+    return false;
+  }
+
+  LoraSlot slot;
+  slot.path = info.path;
+  slot.name = FileNameFromPath(info.path);
+  slot.strength = 1.0f;
+  slot.enabled = true;
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    mLoras.push_back(std::move(slot));
+  }
+  SetStatus("LoRA imported: " + FileNameFromPath(info.path));
+  return true;
+#else
+  SetStatus("LoRA file picker is only implemented for Windows in this demo");
+  return false;
+#endif
+}
+
+void SA3IPlug2Demo::RemoveLora(size_t index)
+{
+  std::lock_guard<std::mutex> lock(mLoraMutex);
+  if (index < mLoras.size())
+    mLoras.erase(mLoras.begin() + (ptrdiff_t)index);
+}
+
+void SA3IPlug2Demo::SetLoraStrength(size_t index, float strength)
+{
+  std::lock_guard<std::mutex> lock(mLoraMutex);
+  if (index < mLoras.size())
+    mLoras[index].strength = std::clamp(strength, 0.0f, 2.0f);
+}
+
+void SA3IPlug2Demo::SetLoraEnabled(size_t index, bool enabled)
+{
+  std::lock_guard<std::mutex> lock(mLoraMutex);
+  if (index < mLoras.size())
+    mLoras[index].enabled = enabled;
+}
+
+std::vector<SA3IPlug2Demo::LoraSlot> SA3IPlug2Demo::Loras() const
+{
+  std::lock_guard<std::mutex> lock(mLoraMutex);
+  return mLoras;
+}
+
 void SA3IPlug2Demo::ToggleOutputPlayback()
 {
-  if (mOutputSamples <= 0)
+  std::lock_guard<std::mutex> lock(mOutputMutex);
+  if (mOutputPlaybackSamples <= 0 || mOutputPlaybackBuffer.empty())
   {
     SetOutputStatus("no output loaded");
     return;
@@ -765,7 +1116,7 @@ void SA3IPlug2Demo::ToggleOutputPlayback()
   }
   else
   {
-    if (mOutputPlayhead.load(std::memory_order_acquire) >= mOutputSamples)
+    if (mOutputPlayhead.load(std::memory_order_acquire) >= mOutputPlaybackSamples)
       mOutputPlayhead.store(0, std::memory_order_release);
     mOutputPlaying.store(true, std::memory_order_release);
     SetOutputStatus("playing output");
@@ -781,7 +1132,8 @@ void SA3IPlug2Demo::StopOutputPlayback()
 
 void SA3IPlug2Demo::SeekOutputPlayback(double seconds)
 {
-  const int sample = std::clamp((int)std::llround(seconds * std::max(1, mOutputSampleRate)), 0, std::max(0, mOutputSamples));
+  const int sampleRate = std::max(1, mOutputPlaybackSampleRate);
+  const int sample = std::clamp((int)std::llround(seconds * sampleRate), 0, std::max(0, mOutputPlaybackSamples));
   mOutputPlayhead.store(sample, std::memory_order_release);
 }
 
@@ -836,7 +1188,11 @@ SA3IPlug2Demo::Waveform SA3IPlug2Demo::OutputWaveform(int bucketCount) const
   std::lock_guard<std::mutex> lock(mOutputMutex);
   wf.numSamples = mOutputSamples;
   wf.sampleRate = mOutputSampleRate;
-  wf.playheadSamples = mOutputPlayhead.load(std::memory_order_acquire);
+  wf.playheadSamples = mOutputPlaybackSampleRate > 0
+                     ? (int)std::llround((double)mOutputPlayhead.load(std::memory_order_acquire)
+                                         * std::max(1, mOutputSampleRate)
+                                         / std::max(1, mOutputPlaybackSampleRate))
+                     : 0;
   wf.active = mOutputPlaying.load(std::memory_order_acquire);
   if (mOutputSamples <= 0 || mOutputBuffer.empty())
     return wf;
@@ -880,6 +1236,28 @@ void SA3IPlug2Demo::ResizeRecordBuffer(double sampleRate)
   mSourceSamples = 0;
   mSourceSampleRate = std::max(1, (int)(sampleRate + 0.5));
   mRecordWritePosition = 0;
+}
+
+void SA3IPlug2Demo::RebuildOutputPlaybackBufferLocked(int hostSampleRate)
+{
+  hostSampleRate = std::max(1, hostSampleRate);
+  mOutputPlaybackBuffer.clear();
+  mOutputPlaybackSamples = 0;
+  mOutputPlaybackSampleRate = hostSampleRate;
+  mOutputPlayhead.store(0, std::memory_order_release);
+  mOutputPlaying.store(false, std::memory_order_release);
+
+  if (mOutputSamples <= 0 || mOutputBuffer.empty())
+    return;
+
+  gary::RecordingSnapshot native;
+  native.channels = mOutputBuffer;
+  native.numSamples = mOutputSamples;
+  native.sampleRate = mOutputSampleRate;
+  const gary::RecordingSnapshot playback = gary::ResampleSnapshotLinear(native, hostSampleRate);
+  mOutputPlaybackBuffer = playback.channels;
+  mOutputPlaybackSamples = playback.numSamples;
+  mOutputPlaybackSampleRate = playback.sampleRate;
 }
 
 void SA3IPlug2Demo::StartAutoRecording()
@@ -942,29 +1320,29 @@ void SA3IPlug2Demo::MixOutputPlayback(sample** outputs, int nOutChans, int nFram
     return;
 
   std::unique_lock<std::mutex> lock(mOutputMutex, std::try_to_lock);
-  if (!lock.owns_lock() || mOutputSamples <= 0 || mOutputBuffer.empty())
+  if (!lock.owns_lock() || mOutputPlaybackSamples <= 0 || mOutputPlaybackBuffer.empty())
     return;
 
-  int playhead = std::clamp(mOutputPlayhead.load(std::memory_order_acquire), 0, mOutputSamples);
-  const int framesToPlay = std::min(nFrames, mOutputSamples - playhead);
+  int playhead = std::clamp(mOutputPlayhead.load(std::memory_order_acquire), 0, mOutputPlaybackSamples);
+  const int framesToPlay = std::min(nFrames, mOutputPlaybackSamples - playhead);
   if (framesToPlay <= 0)
   {
     mOutputPlaying.store(false, std::memory_order_release);
     return;
   }
 
-  const int sourceChannels = (int)mOutputBuffer.size();
+  const int sourceChannels = (int)mOutputPlaybackBuffer.size();
   for (int c = 0; c < nOutChans; ++c)
   {
     if (!outputs[c])
       continue;
-    const auto& src = mOutputBuffer[(size_t)(c % sourceChannels)];
+    const auto& src = mOutputPlaybackBuffer[(size_t)(c % sourceChannels)];
     for (int s = 0; s < framesToPlay && playhead + s < (int)src.size(); ++s)
       outputs[c][s] += (sample)src[(size_t)playhead + s];
   }
 
   playhead += framesToPlay;
-  if (playhead >= mOutputSamples)
+  if (playhead >= mOutputPlaybackSamples)
   {
     mOutputPlayhead.store(0, std::memory_order_release);
     mOutputPlaying.store(false, std::memory_order_release);
@@ -979,7 +1357,7 @@ SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
 {
   RenderInput input;
   input.mode = mode;
-  input.prompt = Prompt();
+  input.prompt = PromptForMode(mode);
   input.durationSeconds = DurationSeconds();
   input.steps = Steps();
   input.initNoiseLevel = InitNoiseLevel();
@@ -988,6 +1366,12 @@ SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
     input.sourceChannels = mSourceBuffer;
     input.sourceSamples = mSourceSamples;
     input.sourceSampleRate = mSourceSampleRate;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    for (const auto& lora : mLoras)
+      if (lora.enabled && lora.strength > 0.0f && !lora.path.empty())
+        input.loras.push_back(lora);
   }
   return input;
 }
@@ -1040,6 +1424,19 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   req.encode_overlap = input.mode == RenderMode::Text ? 0 : 32;
   req.decode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
   req.decode_overlap = input.mode == RenderMode::Text ? 0 : 32;
+
+  std::vector<const char*> loraNames;
+  std::vector<float> loraStrengths;
+  loraNames.reserve(input.loras.size());
+  loraStrengths.reserve(input.loras.size());
+  for (const auto& lora : input.loras)
+  {
+    loraNames.push_back(lora.path.c_str());
+    loraStrengths.push_back(lora.strength);
+  }
+  req.request.n_loras = (int)loraNames.size();
+  req.request.lora_names = loraNames.empty() ? nullptr : loraNames.data();
+  req.request.lora_strengths = loraStrengths.empty() ? nullptr : loraStrengths.data();
 
   struct ProgressUser { SA3IPlug2Demo* self; uint64_t requestId; } progressUser{this, requestId};
   req.request.user = &progressUser;
@@ -1132,12 +1529,12 @@ void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int
     mOutputBuffer = std::move(next);
     mOutputSamples = nSamp;
     mOutputSampleRate = std::max(1, sampleRate);
+    RebuildOutputPlaybackBufferLocked(mHostSampleRate.load(std::memory_order_acquire));
   }
-  mOutputPlayhead.store(0, std::memory_order_release);
-  mOutputPlaying.store(false, std::memory_order_release);
   mOutputRevision.fetch_add(1, std::memory_order_acq_rel);
   char status[128] = {};
-  std::snprintf(status, sizeof status, "output %.2fs ready", (double)nSamp / std::max(1, sampleRate));
+  std::snprintf(status, sizeof status, "output %.2fs @ %d Hz ready",
+                (double)nSamp / std::max(1, sampleRate), std::max(1, sampleRate));
   SetOutputStatus(status);
 }
 
