@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SA3IPlug2DemoRepo VERSION 0.1.0 LANGUAGES C CXX)
+project(SA3IPlug2DemoRepo VERSION 0.1.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,12 +22,8 @@ set(IPLUG_DEPLOY_PLUGINS OFF CACHE BOOL "Deploy built plugins to system director
 include("${IPLUG2_DIR}/iPlug2.cmake")
 find_package(iPlug2 REQUIRED)
 
-add_library(sa3_shared_import SHARED IMPORTED GLOBAL)
-set_target_properties(sa3_shared_import PROPERTIES
-  IMPORTED_IMPLIB "${SA3_BUILD_DIR}/Release/sa3.lib"
-  IMPORTED_LOCATION "${SA3_BUILD_DIR}/bin/Release/sa3.dll"
-  INTERFACE_INCLUDE_DIRECTORIES "${SA3_CPP_DIR}/src"
-)
+add_library(sa3_headers INTERFACE)
+target_include_directories(sa3_headers INTERFACE "${SA3_CPP_DIR}/src")
 
 file(GLOB SA3_RUNTIME_DLLS
   "${SA3_BUILD_DIR}/bin/Release/sa3.dll"

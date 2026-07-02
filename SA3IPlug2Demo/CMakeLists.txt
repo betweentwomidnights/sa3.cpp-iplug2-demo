@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SA3IPlug2Demo VERSION 0.1.0)
+project(SA3IPlug2Demo VERSION 0.1.1)
 
 set(SA3_DEMO_PLATFORM_LIBS)
 if(WIN32)
@@ -22,7 +22,7 @@ iplug_add_plugin(${PROJECT_NAME}
   RESOURCES
     resources/fonts/Roboto-Regular.ttf
   LINK
-    sa3_shared_import
+    sa3_headers
     ${SA3_DEMO_PLATFORM_LIBS}
   DEFINES
     SA3_DEMO_DEFAULT_MODELS_DIR="${SA3_CPP_DIR}/models"

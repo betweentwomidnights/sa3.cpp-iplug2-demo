@@ -2,8 +2,8 @@
 
 #define PLUG_NAME "SA3IPlug2Demo"
 #define PLUG_MFR "TheCollabagePatch"
-#define PLUG_VERSION_HEX 0x00010000
-#define PLUG_VERSION_STR "0.1.0"
+#define PLUG_VERSION_HEX 0x00010100
+#define PLUG_VERSION_STR "0.1.1"
 #define PLUG_UNIQUE_ID 'S3id'
 #define PLUG_MFR_ID 'Tcpa'
 #define PLUG_URL_STR "https://github.com/betweentwomidnights/sa3.cpp"
@@ -59,4 +59,3 @@
 #define APP_SIGNAL_VECTOR_SIZE 64
 
 #define ROBOTO_FN "Roboto-Regular.ttf"
-

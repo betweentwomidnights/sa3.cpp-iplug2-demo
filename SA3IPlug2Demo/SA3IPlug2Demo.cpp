@@ -3,6 +3,16 @@
 #include "IPlug_include_in_plug_src.h"
 #include "IControls.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -56,6 +66,146 @@ std::vector<float> ToPlanar(const gary::RecordingSnapshot& snapshot)
       std::copy(src.begin(), src.begin() + n, out.begin() + (ptrdiff_t)c * snapshot.numSamples);
   }
   return out;
+}
+
+struct Sa3Api
+{
+  using InitFn = sa3_context* (*)(const sa3_config*, char*, int);
+  using GenerateExFn = int (*)(sa3_context*, const sa3_request_ex*, sa3_audio*, char*, int);
+  using FreeAudioFn = void (*)(sa3_audio*);
+  using FreeContextFn = void (*)(sa3_context*);
+
+#ifdef _WIN32
+  HMODULE module = nullptr;
+#endif
+  InitFn init = nullptr;
+  GenerateExFn generateEx = nullptr;
+  FreeAudioFn freeAudio = nullptr;
+  FreeContextFn freeContext = nullptr;
+
+  bool Ready() const noexcept
+  {
+#ifdef _WIN32
+    return module && init && generateEx && freeAudio && freeContext;
+#else
+    return false;
+#endif
+  }
+
+  bool Load(std::string& error)
+  {
+    if (Ready())
+      return true;
+
+#ifdef _WIN32
+    const std::wstring dir = ModuleDirectory(error);
+    if (dir.empty())
+      return false;
+
+    const std::wstring dllPath = dir + L"\\sa3.dll";
+    module = LoadLibraryExW(dllPath.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!module)
+    {
+      error = "LoadLibraryExW failed for " + WideToUtf8(dllPath) + " (win32 " + std::to_string(GetLastError()) + ")";
+      return false;
+    }
+
+    if (!Resolve(init, "sa3_init", error) ||
+        !Resolve(generateEx, "sa3_generate_ex", error) ||
+        !Resolve(freeAudio, "sa3_free_audio", error) ||
+        !Resolve(freeContext, "sa3_free", error))
+    {
+      return false;
+    }
+
+    return true;
+#else
+    error = "runtime libsa3 loading is only implemented for Windows in this demo";
+    return false;
+#endif
+  }
+
+private:
+#ifdef _WIN32
+  static std::string WideToUtf8(const std::wstring& text)
+  {
+    if (text.empty())
+      return {};
+    const int required = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (required <= 1)
+      return {};
+    std::string out((size_t)required - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, out.data(), required, nullptr, nullptr);
+    return out;
+  }
+
+  static std::wstring ModuleDirectory(std::string& error)
+  {
+    HMODULE self = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(&ModuleDirectory), &self))
+    {
+      error = "GetModuleHandleExW failed (win32 " + std::to_string(GetLastError()) + ")";
+      return {};
+    }
+
+    std::vector<wchar_t> buffer(1024);
+    for (;;)
+    {
+      const DWORD length = GetModuleFileNameW(self, buffer.data(), (DWORD)buffer.size());
+      if (length == 0)
+      {
+        error = "GetModuleFileNameW failed (win32 " + std::to_string(GetLastError()) + ")";
+        return {};
+      }
+      if (length < buffer.size() - 1)
+      {
+        std::wstring path(buffer.data(), length);
+        const size_t slash = path.find_last_of(L"\\/");
+        if (slash == std::wstring::npos)
+        {
+          error = "could not derive module directory from " + WideToUtf8(path);
+          return {};
+        }
+        return path.substr(0, slash);
+      }
+      buffer.resize(buffer.size() * 2);
+    }
+  }
+
+  template <typename Fn>
+  bool Resolve(Fn& fn, const char* name, std::string& error)
+  {
+    FARPROC proc = GetProcAddress(module, name);
+    if (!proc)
+    {
+      error = std::string("GetProcAddress failed for ") + name + " (win32 " + std::to_string(GetLastError()) + ")";
+      return false;
+    }
+    fn = reinterpret_cast<Fn>(proc);
+    return true;
+  }
+#endif
+};
+
+Sa3Api& SharedSa3Api()
+{
+  static Sa3Api api;
+  return api;
+}
+
+const Sa3Api* LoadSa3Api(std::string& error)
+{
+  static std::mutex mutex;
+  std::lock_guard<std::mutex> lock(mutex);
+  Sa3Api& api = SharedSa3Api();
+  return api.Load(error) ? &api : nullptr;
+}
+
+const Sa3Api* LoadedSa3Api()
+{
+  const Sa3Api& api = SharedSa3Api();
+  return api.Ready() ? &api : nullptr;
 }
 
 class SA3DemoControl final : public IControl
@@ -391,7 +541,11 @@ SA3IPlug2Demo::~SA3IPlug2Demo()
 {
   StopWorker();
   if (mContext)
-    sa3_free(mContext);
+  {
+    if (const Sa3Api* sa3 = LoadedSa3Api())
+      sa3->freeContext(mContext);
+    mContext = nullptr;
+  }
 }
 
 #if IPLUG_DSP
@@ -846,6 +1000,14 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     mBusy.store(false, std::memory_order_release);
   };
 
+  std::string loadError;
+  const Sa3Api* sa3 = LoadSa3Api(loadError);
+  if (!sa3)
+  {
+    finish("libsa3 load failed: " + loadError);
+    return;
+  }
+
   char err[1024] = {};
   if (!mContext)
   {
@@ -855,7 +1017,7 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     cfg.models_dir = models.c_str();
     cfg.variant = "medium";
     cfg.encoding = "f16";
-    mContext = sa3_init(&cfg, err, (int)sizeof err);
+    mContext = sa3->init(&cfg, err, (int)sizeof err);
     if (!mContext)
     {
       finish(std::string("sa3_init failed: ") + err);
@@ -917,7 +1079,7 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
             : input.mode == RenderMode::Transform ? "transforming source"
                                             : "continuing source");
   sa3_audio audio = {};
-  const int rc = sa3_generate_ex(mContext, &req, &audio, err, (int)sizeof err);
+  const int rc = sa3->generateEx(mContext, &req, &audio, err, (int)sizeof err);
   if (rc != 0)
   {
     finish(std::string("sa3 failed: ") + err);
@@ -925,7 +1087,7 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   }
 
   InstallOutputFromPlanar(audio.samples, audio.n_samp, audio.n_ch, audio.sample_rate);
-  sa3_free_audio(&audio);
+  sa3->freeAudio(&audio);
   SaveOutputToDisk();
   finish("render complete");
 }
