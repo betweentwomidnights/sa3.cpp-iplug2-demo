@@ -129,7 +129,7 @@ private:
 
   static int ModeIndex(RenderMode mode) noexcept;
   void ResizeRecordBuffer(double sampleRate);
-  void RebuildOutputPlaybackBufferLocked(int hostSampleRate);
+  void RebuildOutputPlaybackBufferFromNativeLocked(int hostSampleRate);
   void StartAutoRecording();
   void StopAutoRecording();
   void CopyInputToRecordBuffer(sample** inputs, int nInChans, int nFrames);
@@ -175,9 +175,11 @@ private:
   std::vector<std::vector<float>> mOutputBuffer;
   int mOutputSamples = 0;
   int mOutputSampleRate = 44100;
+
+  mutable std::mutex mOutputPlaybackMutex;
   std::vector<std::vector<float>> mOutputPlaybackBuffer;
-  int mOutputPlaybackSamples = 0;
-  int mOutputPlaybackSampleRate = 44100;
+  std::atomic<int> mOutputPlaybackSamples{0};
+  std::atomic<int> mOutputPlaybackSampleRate{44100};
   std::atomic<bool> mOutputPlaying{false};
   std::atomic<int> mOutputPlayhead{0};
   std::atomic<uint64_t> mOutputRevision{0};

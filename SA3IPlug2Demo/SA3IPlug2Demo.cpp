@@ -796,7 +796,7 @@ void SA3IPlug2Demo::OnReset()
   ResizeRecordBuffer(hostRate);
   {
     std::lock_guard<std::mutex> lock(mOutputMutex);
-    RebuildOutputPlaybackBufferLocked(hostRate);
+    RebuildOutputPlaybackBufferFromNativeLocked(hostRate);
   }
   mWasTransportRunning = false;
 }
@@ -1102,8 +1102,8 @@ std::vector<SA3IPlug2Demo::LoraSlot> SA3IPlug2Demo::Loras() const
 
 void SA3IPlug2Demo::ToggleOutputPlayback()
 {
-  std::lock_guard<std::mutex> lock(mOutputMutex);
-  if (mOutputPlaybackSamples <= 0 || mOutputPlaybackBuffer.empty())
+  std::lock_guard<std::mutex> lock(mOutputPlaybackMutex);
+  if (mOutputPlaybackSamples.load(std::memory_order_acquire) <= 0 || mOutputPlaybackBuffer.empty())
   {
     SetOutputStatus("no output loaded");
     return;
@@ -1116,7 +1116,7 @@ void SA3IPlug2Demo::ToggleOutputPlayback()
   }
   else
   {
-    if (mOutputPlayhead.load(std::memory_order_acquire) >= mOutputPlaybackSamples)
+    if (mOutputPlayhead.load(std::memory_order_acquire) >= mOutputPlaybackSamples.load(std::memory_order_acquire))
       mOutputPlayhead.store(0, std::memory_order_release);
     mOutputPlaying.store(true, std::memory_order_release);
     SetOutputStatus("playing output");
@@ -1132,8 +1132,9 @@ void SA3IPlug2Demo::StopOutputPlayback()
 
 void SA3IPlug2Demo::SeekOutputPlayback(double seconds)
 {
-  const int sampleRate = std::max(1, mOutputPlaybackSampleRate);
-  const int sample = std::clamp((int)std::llround(seconds * sampleRate), 0, std::max(0, mOutputPlaybackSamples));
+  const int sampleRate = std::max(1, mOutputPlaybackSampleRate.load(std::memory_order_acquire));
+  const int sampleCount = std::max(0, mOutputPlaybackSamples.load(std::memory_order_acquire));
+  const int sample = std::clamp((int)std::llround(seconds * sampleRate), 0, sampleCount);
   mOutputPlayhead.store(sample, std::memory_order_release);
 }
 
@@ -1188,10 +1189,11 @@ SA3IPlug2Demo::Waveform SA3IPlug2Demo::OutputWaveform(int bucketCount) const
   std::lock_guard<std::mutex> lock(mOutputMutex);
   wf.numSamples = mOutputSamples;
   wf.sampleRate = mOutputSampleRate;
-  wf.playheadSamples = mOutputPlaybackSampleRate > 0
+  const int playbackRate = mOutputPlaybackSampleRate.load(std::memory_order_acquire);
+  wf.playheadSamples = playbackRate > 0
                      ? (int)std::llround((double)mOutputPlayhead.load(std::memory_order_acquire)
                                          * std::max(1, mOutputSampleRate)
-                                         / std::max(1, mOutputPlaybackSampleRate))
+                                         / std::max(1, playbackRate))
                      : 0;
   wf.active = mOutputPlaying.load(std::memory_order_acquire);
   if (mOutputSamples <= 0 || mOutputBuffer.empty())
@@ -1238,26 +1240,28 @@ void SA3IPlug2Demo::ResizeRecordBuffer(double sampleRate)
   mRecordWritePosition = 0;
 }
 
-void SA3IPlug2Demo::RebuildOutputPlaybackBufferLocked(int hostSampleRate)
+void SA3IPlug2Demo::RebuildOutputPlaybackBufferFromNativeLocked(int hostSampleRate)
 {
   hostSampleRate = std::max(1, hostSampleRate);
-  mOutputPlaybackBuffer.clear();
-  mOutputPlaybackSamples = 0;
-  mOutputPlaybackSampleRate = hostSampleRate;
-  mOutputPlayhead.store(0, std::memory_order_release);
-  mOutputPlaying.store(false, std::memory_order_release);
-
-  if (mOutputSamples <= 0 || mOutputBuffer.empty())
-    return;
-
   gary::RecordingSnapshot native;
   native.channels = mOutputBuffer;
   native.numSamples = mOutputSamples;
   native.sampleRate = mOutputSampleRate;
-  const gary::RecordingSnapshot playback = gary::ResampleSnapshotLinear(native, hostSampleRate);
-  mOutputPlaybackBuffer = playback.channels;
-  mOutputPlaybackSamples = playback.numSamples;
-  mOutputPlaybackSampleRate = playback.sampleRate;
+
+  gary::RecordingSnapshot playback;
+  if (native.numSamples > 0 && !native.channels.empty())
+    playback = gary::ResampleSnapshotLinear(native, hostSampleRate);
+  else
+    playback.sampleRate = hostSampleRate;
+
+  {
+    std::lock_guard<std::mutex> playbackLock(mOutputPlaybackMutex);
+    mOutputPlaybackBuffer = std::move(playback.channels);
+    mOutputPlaybackSamples.store(playback.numSamples, std::memory_order_release);
+    mOutputPlaybackSampleRate.store(std::max(1, playback.sampleRate), std::memory_order_release);
+    mOutputPlayhead.store(0, std::memory_order_release);
+    mOutputPlaying.store(false, std::memory_order_release);
+  }
 }
 
 void SA3IPlug2Demo::StartAutoRecording()
@@ -1319,12 +1323,13 @@ void SA3IPlug2Demo::MixOutputPlayback(sample** outputs, int nOutChans, int nFram
   if (!outputs || nOutChans <= 0 || nFrames <= 0 || !mOutputPlaying.load(std::memory_order_acquire))
     return;
 
-  std::unique_lock<std::mutex> lock(mOutputMutex, std::try_to_lock);
-  if (!lock.owns_lock() || mOutputPlaybackSamples <= 0 || mOutputPlaybackBuffer.empty())
+  std::unique_lock<std::mutex> lock(mOutputPlaybackMutex, std::try_to_lock);
+  const int playbackSamples = mOutputPlaybackSamples.load(std::memory_order_acquire);
+  if (!lock.owns_lock() || playbackSamples <= 0 || mOutputPlaybackBuffer.empty())
     return;
 
-  int playhead = std::clamp(mOutputPlayhead.load(std::memory_order_acquire), 0, mOutputPlaybackSamples);
-  const int framesToPlay = std::min(nFrames, mOutputPlaybackSamples - playhead);
+  int playhead = std::clamp(mOutputPlayhead.load(std::memory_order_acquire), 0, playbackSamples);
+  const int framesToPlay = std::min(nFrames, playbackSamples - playhead);
   if (framesToPlay <= 0)
   {
     mOutputPlaying.store(false, std::memory_order_release);
@@ -1342,7 +1347,7 @@ void SA3IPlug2Demo::MixOutputPlayback(sample** outputs, int nOutChans, int nFram
   }
 
   playhead += framesToPlay;
-  if (playhead >= mOutputPlaybackSamples)
+  if (playhead >= playbackSamples)
   {
     mOutputPlayhead.store(0, std::memory_order_release);
     mOutputPlaying.store(false, std::memory_order_release);
@@ -1529,7 +1534,7 @@ void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int
     mOutputBuffer = std::move(next);
     mOutputSamples = nSamp;
     mOutputSampleRate = std::max(1, sampleRate);
-    RebuildOutputPlaybackBufferLocked(mHostSampleRate.load(std::memory_order_acquire));
+    RebuildOutputPlaybackBufferFromNativeLocked(mHostSampleRate.load(std::memory_order_acquire));
   }
   mOutputRevision.fetch_add(1, std::memory_order_acq_rel);
   char status[128] = {};
