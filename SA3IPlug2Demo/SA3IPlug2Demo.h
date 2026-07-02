@@ -94,6 +94,7 @@ public:
   bool OutputPlaying() const noexcept { return mOutputPlaying.load(std::memory_order_acquire); }
 
   void StartRender(RenderMode mode);
+  void CancelRender();
   bool LoadDroppedAudioFile(const char* rawPath);
   bool SaveOutputToDisk();
   gary::AudioFileInfo CreateOutputDragCopy();
@@ -190,5 +191,6 @@ private:
   std::atomic<int> mHostSampleRate{44100};
   std::thread mWorker;
   std::atomic<uint64_t> mRequestId{0};
+  std::atomic<bool> mCancelRequested{false};
   sa3_context* mContext = nullptr;
 };

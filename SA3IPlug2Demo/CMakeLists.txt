@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SA3IPlug2Demo VERSION 0.1.2)
+project(SA3IPlug2Demo VERSION 0.1.3)
 
 set(SA3_DEMO_PLATFORM_LIBS)
 if(WIN32)

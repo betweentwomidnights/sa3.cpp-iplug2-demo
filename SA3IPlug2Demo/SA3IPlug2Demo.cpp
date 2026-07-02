@@ -300,7 +300,7 @@ public:
     y = DrawLoraPanel(g, IRECT(left, y, right, y + 82.f)) + 8.f;
 
     mRunRect = IRECT(left, y, left + 180.f, y + 32.f);
-    DrawButton(g, mRunRect, ActionLabel(mode), kDemoFont, false, !mPlugin.Busy());
+    DrawButton(g, mRunRect, mPlugin.Busy() ? "cancel" : ActionLabel(mode), kDemoFont);
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
                mPlugin.TransportRunning() ? "host rolling: recording input" : "host stopped",
                IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
@@ -342,7 +342,11 @@ public:
       case Hit::LoraToggle:     ToggleLora(hit.index); SetDirty(false); return;
       case Hit::LoraRemove:     mPlugin.RemoveLora(hit.index); SetDirty(false); return;
       case Hit::AddLora:        mPlugin.ImportLoraFromDialog(); SetDirty(false); return;
-      case Hit::Run:            mPlugin.StartRender(mPlugin.CurrentRenderMode()); SetDirty(false); return;
+      case Hit::Run:
+        if (mPlugin.Busy()) mPlugin.CancelRender();
+        else mPlugin.StartRender(mPlugin.CurrentRenderMode());
+        SetDirty(false);
+        return;
       case Hit::OutputPlay:     mPlugin.ToggleOutputPlayback(); SetDirty(false); return;
       case Hit::OutputStop:     mPlugin.StopOutputPlayback(); SetDirty(false); return;
       case Hit::OutputSave:     mPlugin.SaveOutputToDisk(); SetDirty(false); return;
@@ -936,13 +940,14 @@ void SA3IPlug2Demo::StartRender(RenderMode mode)
 {
   if (mBusy.exchange(true, std::memory_order_acq_rel))
   {
-    SetStatus("render already running");
+    CancelRender();
     return;
   }
 
   if (mWorker.joinable())
     mWorker.join();
 
+  mCancelRequested.store(false, std::memory_order_release);
   RenderInput input = CaptureRenderInput(mode);
   if (mode != RenderMode::Text && (input.sourceSamples <= 0 || input.sourceChannels.empty()))
   {
@@ -960,6 +965,17 @@ void SA3IPlug2Demo::StartRender(RenderMode mode)
   mWorker = std::thread([this, requestId, input = std::move(input)]() mutable {
     RenderWorkerMain(requestId, std::move(input));
   });
+}
+
+void SA3IPlug2Demo::CancelRender()
+{
+  if (!mBusy.load(std::memory_order_acquire))
+    return;
+
+  mCancelRequested.store(true, std::memory_order_release);
+  mRequestId.fetch_add(1, std::memory_order_acq_rel);
+  mOutputPlaying.store(false, std::memory_order_release);
+  SetStatus("cancelling render");
 }
 
 bool SA3IPlug2Demo::LoadDroppedAudioFile(const char* rawPath)
@@ -1383,8 +1399,9 @@ SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
 
 void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
 {
-  auto finish = [this](const std::string& status) {
-    SetStatus(status);
+  auto finish = [this, requestId](const std::string& status, bool forceStatus = false) {
+    if (forceStatus || requestId == mRequestId.load(std::memory_order_acquire))
+      SetStatus(status);
     mProgress.store(0.f, std::memory_order_release);
     mBusy.store(false, std::memory_order_release);
   };
@@ -1424,11 +1441,11 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   req.request.seed = -1;
   req.request.cfg_scale = 1.0f;
   req.request.duration_padding_sec = input.mode == RenderMode::Text ? 6.0f : 0.0f;
-  req.request.keep_models = 1;
+  req.request.keep_models = 0;
   req.encode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
-  req.encode_overlap = input.mode == RenderMode::Text ? 0 : 32;
-  req.decode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
-  req.decode_overlap = input.mode == RenderMode::Text ? 0 : 32;
+  req.encode_overlap = 32;
+  req.decode_chunk_size = 128;
+  req.decode_overlap = 32;
 
   std::vector<const char*> loraNames;
   std::vector<float> loraStrengths;
@@ -1453,6 +1470,14 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     char text[160] = {};
     std::snprintf(text, sizeof text, "%s %d/%d %.0f%%", stage ? stage : "render", step, total, fraction * 100.0f);
     u->self->SetStatus(text);
+  };
+  req.cancel_user = &progressUser;
+  req.should_cancel = [](void* user) -> int {
+    auto* u = static_cast<ProgressUser*>(user);
+    if (!u || !u->self)
+      return 1;
+    return u->self->mCancelRequested.load(std::memory_order_acquire)
+           || u->requestId != u->self->mRequestId.load(std::memory_order_acquire);
   };
 
   if (input.mode == RenderMode::Transform)
@@ -1484,7 +1509,26 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   const int rc = sa3->generateEx(mContext, &req, &audio, err, (int)sizeof err);
   if (rc != 0)
   {
-    finish(std::string("sa3 failed: ") + err);
+    const bool cancelled = mCancelRequested.load(std::memory_order_acquire)
+                           || requestId != mRequestId.load(std::memory_order_acquire);
+    if (cancelled)
+    {
+      mCancelRequested.store(false, std::memory_order_release);
+      finish("render cancelled", true);
+    }
+    else
+    {
+      finish(std::string("sa3 failed: ") + err);
+    }
+    return;
+  }
+
+  if (mCancelRequested.load(std::memory_order_acquire)
+      || requestId != mRequestId.load(std::memory_order_acquire))
+  {
+    sa3->freeAudio(&audio);
+    mCancelRequested.store(false, std::memory_order_release);
+    finish("render cancelled", true);
     return;
   }
 
@@ -1496,10 +1540,12 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
 
 void SA3IPlug2Demo::StopWorker()
 {
-  ++mRequestId;
+  mCancelRequested.store(true, std::memory_order_release);
+  mRequestId.fetch_add(1, std::memory_order_acq_rel);
   if (mWorker.joinable())
     mWorker.join();
   mBusy.store(false, std::memory_order_release);
+  mCancelRequested.store(false, std::memory_order_release);
 }
 
 void SA3IPlug2Demo::SetStatus(const std::string& text)

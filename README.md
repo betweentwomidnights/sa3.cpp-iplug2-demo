@@ -62,7 +62,9 @@ The CMake defaults prefer `C:/dev/sa3.cpp/build-cuda` when that build contains `
 
 If the demo feels CPU-bound, confirm that `SA3_BUILD_DIR` points at the CUDA-enabled `sa3.cpp` build and that `ggml-cuda.dll`, `cudart64_*.dll`, `cublas64_*.dll`, and `cublasLt64_*.dll` are present beside the built app/VST3 binary.
 
-The render request uses the same embedded `libsa3` path for all modes. Transform and continue enable outer SAME-L chunked encode/decode settings (`128` with `32` overlap); text generation leaves those chunk settings at zero because there is no init audio to encode. SAME-L sliding-window attention is handled inside `libsa3` from the model metadata, not by a separate plugin UI control.
+The render request uses the same embedded `libsa3` path for all modes. Text generation, transform, and continue all request outer SAME-L chunked decode (`128` with `32` overlap). Transform and continue also request chunked encode for their source audio. SAME-L sliding-window attention is handled inside `libsa3` from the model metadata, not by a separate plugin UI control.
+
+The demo runs renders in frugal/early-free mode (`keep_models = 0`) so long text2music generations can release T5 before sampling, release DiT before decode, and fully release the autoencoder path after decode. The run button becomes a cancel button during active generation, and plugin teardown asks `libsa3` to cancel cooperatively before joining the worker thread.
 
 ## DAW scanning notes
 
@@ -82,7 +84,7 @@ Copy-Item -LiteralPath C:\dev\sa3-iplug2-demo\build\out\SA3IPlug2Demo.vst3 -Dest
 The current validated metadata is:
 
 - vendor: `the collabage patch`
-- version: `0.1.2`
+- version: `0.1.3`
 - VST3 validator: `47 tests passed, 0 tests failed`
 
 ## Playback crackle triage
