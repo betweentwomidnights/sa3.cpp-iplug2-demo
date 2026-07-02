@@ -6,14 +6,15 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <vector>
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -38,6 +39,12 @@ constexpr const char* kOutputUndoFileName = "myOutput.undo.wav";
 constexpr const char* kDraggedAudioFolderName = "dragged_audio";
 constexpr const char* kLoraFolderName = "loras";
 
+#ifndef SA3_DEMO_SA3_CPP_DIR
+#define SA3_DEMO_SA3_CPP_DIR "C:/dev/sa3.cpp"
+#endif
+
+std::string ExtensionLower(const std::string& path);
+
 std::string JoinPath(const std::string& left, const char* right)
 {
   if (left.empty())
@@ -53,6 +60,354 @@ std::string JoinPath(const std::string& left, const char* right)
     return left + right;
 
   return left + separator + right;
+}
+
+std::string ToLower(std::string text)
+{
+  std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return text;
+}
+
+std::string Trim(std::string text)
+{
+  const auto begin = std::find_if_not(text.begin(), text.end(), [](unsigned char c) { return std::isspace(c) != 0; });
+  const auto end = std::find_if_not(text.rbegin(), text.rend(), [](unsigned char c) { return std::isspace(c) != 0; }).base();
+  if (begin >= end)
+    return {};
+  return std::string(begin, end);
+}
+
+std::string DirectoryOnly(const std::string& path)
+{
+  const size_t slash = path.find_last_of("\\/");
+  return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+std::string WithoutExtension(const std::string& path)
+{
+  const size_t slash = path.find_last_of("\\/");
+  const size_t dot = path.find_last_of('.');
+  if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
+    return path;
+  return path.substr(0, dot);
+}
+
+std::string StemOnly(const std::string& path)
+{
+  std::string name = path;
+  const size_t slash = name.find_last_of("\\/");
+  if (slash != std::string::npos)
+    name = name.substr(slash + 1u);
+  const size_t dot = name.find_last_of('.');
+  if (dot != std::string::npos)
+    name = name.substr(0, dot);
+  return name;
+}
+
+bool FileExists(const std::string& path)
+{
+  return FileSizeBytes(path) > 0;
+}
+
+bool DirectoryExists(const std::string& path)
+{
+  if (path.empty())
+    return false;
+#if defined(_WIN32)
+  const DWORD attributes = GetFileAttributesA(path.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+  struct stat st = {};
+  return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+std::string ParentDirectory(const std::string& path)
+{
+  return DirectoryOnly(DirectoryOnly(path));
+}
+
+void AddUniquePrompt(std::vector<std::string>& prompts, std::string prompt)
+{
+  prompt = Trim(std::move(prompt));
+  if (prompt.empty())
+    return;
+  if (prompt.size() >= 3 && static_cast<unsigned char>(prompt[0]) == 0xef
+      && static_cast<unsigned char>(prompt[1]) == 0xbb
+      && static_cast<unsigned char>(prompt[2]) == 0xbf)
+  {
+    prompt.erase(0, 3);
+    prompt = Trim(std::move(prompt));
+  }
+  if (prompt.empty())
+    return;
+  if (std::find(prompts.begin(), prompts.end(), prompt) == prompts.end())
+    prompts.push_back(std::move(prompt));
+}
+
+std::string ReadWholeTextFile(const std::string& path)
+{
+  std::ifstream in(path, std::ios::binary);
+  if (!in)
+    return {};
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+void AppendJsonArrayStrings(const std::string& path, std::vector<std::string>& prompts)
+{
+  const std::string text = ReadWholeTextFile(path);
+  if (text.empty())
+    return;
+
+  int arrayDepth = 0;
+  bool inString = false;
+  bool escape = false;
+  std::string current;
+  for (char c : text)
+  {
+    if (!inString)
+    {
+      if (c == '[')
+        ++arrayDepth;
+      else if (c == ']' && arrayDepth > 0)
+        --arrayDepth;
+      else if (c == '"' && arrayDepth > 0)
+      {
+        inString = true;
+        escape = false;
+        current.clear();
+      }
+      continue;
+    }
+
+    if (escape)
+    {
+      switch (c)
+      {
+        case 'n': current.push_back('\n'); break;
+        case 'r': current.push_back('\r'); break;
+        case 't': current.push_back('\t'); break;
+        default: current.push_back(c); break;
+      }
+      escape = false;
+      continue;
+    }
+
+    if (c == '\\')
+    {
+      escape = true;
+      continue;
+    }
+    if (c == '"')
+    {
+      inString = false;
+      AddUniquePrompt(prompts, current);
+      continue;
+    }
+    current.push_back(c);
+  }
+}
+
+void AppendTxtPromptsFromDirectory(const std::string& directory, std::vector<std::string>& prompts)
+{
+  if (!DirectoryExists(directory))
+    return;
+
+#if defined(_WIN32)
+  const std::string pattern = JoinPath(directory, "*.txt");
+  WIN32_FIND_DATAA findData = {};
+  HANDLE find = FindFirstFileA(pattern.c_str(), &findData);
+  if (find == INVALID_HANDLE_VALUE)
+    return;
+
+  do
+  {
+    if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+      continue;
+    AddUniquePrompt(prompts, ReadWholeTextFile(JoinPath(directory, findData.cFileName)));
+  } while (FindNextFileA(find, &findData));
+
+  FindClose(find);
+#endif
+}
+
+std::string NormalizeLoraName(const std::string& pathOrName)
+{
+  std::string name = StemOnly(pathOrName);
+  std::string lower = ToLower(name);
+  if (lower.rfind("lora-", 0) == 0 && name.size() > 5)
+  {
+    name = name.substr(5);
+    lower = ToLower(name);
+  }
+
+  const char* suffixes[] = { "-f32", "-f16", "-q8_0", "-q5_1", "-q5_0", "-q4_1", "-q4_0" };
+  for (const char* suffix : suffixes)
+  {
+    const std::string s = suffix;
+    if (lower.size() > s.size() && lower.rfind(s) == lower.size() - s.size())
+    {
+      name.resize(name.size() - s.size());
+      break;
+    }
+  }
+  return name.empty() ? StemOnly(pathOrName) : name;
+}
+
+std::string QuoteArg(const std::string& arg)
+{
+  std::string out = "\"";
+  for (char c : arg)
+  {
+    if (c == '"')
+      out += "\\\"";
+    else
+      out.push_back(c);
+  }
+  out.push_back('"');
+  return out;
+}
+
+std::string PythonExecutable()
+{
+  const std::string venv = JoinPath(JoinPath(Sa3CppDirectory(), ".venv"), "Scripts\\python.exe");
+  if (FileExists(venv))
+    return venv;
+  return "python";
+}
+
+bool RunProcessAndWait(const std::string& commandLine, const std::string& workDir, std::string& error)
+{
+#if defined(_WIN32)
+  STARTUPINFOA startup = {};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESHOWWINDOW;
+  startup.wShowWindow = SW_HIDE;
+  PROCESS_INFORMATION process = {};
+  std::vector<char> mutableCommand(commandLine.begin(), commandLine.end());
+  mutableCommand.push_back('\0');
+
+  const BOOL ok = CreateProcessA(nullptr,
+                                 mutableCommand.data(),
+                                 nullptr,
+                                 nullptr,
+                                 FALSE,
+                                 CREATE_NO_WINDOW,
+                                 nullptr,
+                                 workDir.empty() ? nullptr : workDir.c_str(),
+                                 &startup,
+                                 &process);
+  if (!ok)
+  {
+    error = "failed to launch converter, win32 error " + std::to_string(GetLastError());
+    return false;
+  }
+
+  WaitForSingleObject(process.hProcess, INFINITE);
+  DWORD exitCode = 1;
+  GetExitCodeProcess(process.hProcess, &exitCode);
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+  if (exitCode != 0)
+  {
+    error = "converter exited with code " + std::to_string(exitCode);
+    return false;
+  }
+  return true;
+#else
+  (void)commandLine;
+  (void)workDir;
+  error = "LoRA conversion is only wired for Windows in this demo";
+  return false;
+#endif
+}
+
+bool LoraExportPairExists(const std::string& base)
+{
+  return FileExists(base + ".safetensors") && FileExists(base + ".json");
+}
+
+std::string FindExportedLoraBase(const std::string& path, std::string& error)
+{
+  const std::string ext = ExtensionLower(path);
+  const std::string base = WithoutExtension(path);
+  if (ext == "safetensors")
+  {
+    if (LoraExportPairExists(base))
+      return base;
+    error = "safetensors import needs matching " + StemOnly(path) + ".json metadata";
+    return {};
+  }
+
+  if (ext != "ckpt")
+  {
+    error = "unsupported LoRA source type";
+    return {};
+  }
+
+  std::vector<std::string> candidates;
+  candidates.push_back(base);
+
+  const std::string dir = DirectoryOnly(path);
+  const std::string parent = ParentDirectory(path);
+  const std::string stem = StemOnly(path);
+  if (!parent.empty())
+    candidates.push_back(JoinPath(parent, stem.c_str()));
+  if (!dir.empty())
+    candidates.push_back(JoinPath(dir, NormalizeLoraName(path).c_str()));
+
+  for (const std::string& candidate : candidates)
+    if (LoraExportPairExists(candidate))
+      return candidate;
+
+  error = "ckpt import needs exported " + stem + ".safetensors and " + stem + ".json; run tools/lora_ckpt_export.py first";
+  return {};
+}
+
+std::vector<std::string> LoadPromptPoolForLoraSource(const std::string& sourcePath, const std::string& displayName)
+{
+  std::vector<std::string> prompts;
+  const std::string dir = DirectoryOnly(sourcePath);
+  const std::string parent = ParentDirectory(sourcePath);
+  const std::string stem = NormalizeLoraName(displayName.empty() ? sourcePath : displayName);
+
+  AppendTxtPromptsFromDirectory(dir, prompts);
+  if (!dir.empty())
+    AppendTxtPromptsFromDirectory(JoinPath(dir, stem.c_str()), prompts);
+  if (!parent.empty())
+    AppendTxtPromptsFromDirectory(JoinPath(parent, stem.c_str()), prompts);
+
+  const std::string sa3Root = Sa3CppDirectory();
+  AppendTxtPromptsFromDirectory(JoinPath(JoinPath(sa3Root, "loras"), stem.c_str()), prompts);
+  AppendJsonArrayStrings(JoinPath(JoinPath(sa3Root, "prompts"), (stem + ".json").c_str()), prompts);
+  return prompts;
+}
+
+bool ConvertLoraToGguf(const std::string& exportedBase, const std::string& destination, std::string& error)
+{
+  const std::string sa3Root = Sa3CppDirectory();
+  const std::string script = JoinPath(JoinPath(sa3Root, "tools"), "convert_lora.py");
+  if (!FileExists(script))
+  {
+    error = "missing converter script at " + script;
+    return false;
+  }
+
+  const std::string command = QuoteArg(PythonExecutable())
+                            + " "
+                            + QuoteArg(script)
+                            + " --in "
+                            + QuoteArg(exportedBase)
+                            + " --out "
+                            + QuoteArg(destination);
+  if (!RunProcessAndWait(command, sa3Root, error))
+    return false;
+  if (!FileExists(destination))
+  {
+    error = "converter did not create a gguf file";
+    return false;
+  }
+  return true;
 }
 
 #if defined(_WIN32)
@@ -622,6 +977,14 @@ std::string LoraDirectory(std::string* error)
   return loras;
 }
 
+std::string Sa3CppDirectory()
+{
+  if (const char* path = std::getenv("SA3_CPP_DIR"))
+    if (*path)
+      return path;
+  return SA3_DEMO_SA3_CPP_DIR;
+}
+
 std::string DraggedAudioDirectory(std::string* error = nullptr)
 {
   const std::string documents = DocumentsDirectory(error);
@@ -763,14 +1126,9 @@ AudioFileInfo ImportLoraFile(const std::string& path)
   info.bytes = FileSizeBytes(path);
 
   const std::string ext = ExtensionLower(path);
-  if (ext == "ckpt")
+  if (ext != "gguf" && ext != "safetensors" && ext != "ckpt")
   {
-    info.error = "ckpt LoRA conversion is not in libsa3 yet; import a gguf LoRA";
-    return info;
-  }
-  if (ext != "gguf")
-  {
-    info.error = "only gguf LoRA files can be imported";
+    info.error = "import a gguf, safetensors, or ckpt LoRA";
     return info;
   }
   if (info.bytes < 1)
@@ -787,21 +1145,49 @@ AudioFileInfo ImportLoraFile(const std::string& path)
     return info;
   }
 
-  const std::string destination = JoinPath(loraDir, FileNameOnly(path).c_str());
-#if defined(_WIN32)
-  if (_stricmp(path.c_str(), destination.c_str()) == 0)
-#else
-  if (path == destination)
-#endif
+  const std::string displayName = NormalizeLoraName(path);
+  info.name = displayName;
+  info.prompts = LoadPromptPoolForLoraSource(path, displayName);
+
+  if (ext == "gguf")
   {
+    const std::string destination = JoinPath(loraDir, FileNameOnly(path).c_str());
+#if defined(_WIN32)
+    if (_stricmp(path.c_str(), destination.c_str()) == 0)
+#else
+    if (path == destination)
+#endif
+    {
+      info.path = destination;
+      info.ok = true;
+      return info;
+    }
+
+    if (!CopyFileBytes(path, destination, error))
+    {
+      info.error = std::string("LoRA copy failed: ") + error;
+      return info;
+    }
+
     info.path = destination;
-    info.ok = true;
+    info.bytes = FileSizeBytes(destination);
+    info.ok = info.bytes > 0;
+    if (!info.ok)
+      info.error = "LoRA import completed but destination file is empty";
     return info;
   }
 
-  if (!CopyFileBytes(path, destination, error))
+  const std::string exportedBase = FindExportedLoraBase(path, error);
+  if (exportedBase.empty())
   {
-    info.error = std::string("LoRA copy failed: ") + error;
+    info.error = error;
+    return info;
+  }
+
+  const std::string destination = JoinPath(loraDir, (displayName + ".gguf").c_str());
+  if (!ConvertLoraToGguf(exportedBase, destination, error))
+  {
+    info.error = std::string("LoRA conversion failed: ") + error;
     return info;
   }
 
@@ -811,6 +1197,19 @@ AudioFileInfo ImportLoraFile(const std::string& path)
   if (!info.ok)
     info.error = "LoRA import completed but destination file is empty";
   return info;
+}
+
+std::vector<std::string> LoadDefaultPromptPool()
+{
+  std::vector<std::string> prompts;
+  AppendJsonArrayStrings(JoinPath(JoinPath(Sa3CppDirectory(), "prompts"), "defaults.json"), prompts);
+  if (prompts.empty())
+  {
+    AddUniquePrompt(prompts, "warm analog synthwave with a hypnotic arpeggio");
+    AddUniquePrompt(prompts, "dusty boom-bap beat with a soulful sample chop");
+    AddUniquePrompt(prompts, "cinematic post-rock build with shimmering guitars");
+  }
+  return prompts;
 }
 
 bool OutputUndoAvailable()

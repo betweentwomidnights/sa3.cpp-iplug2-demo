@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <random>
 
 #ifndef SA3_DEMO_DEFAULT_MODELS_DIR
 #define SA3_DEMO_DEFAULT_MODELS_DIR "C:/dev/sa3.cpp/models"
@@ -216,6 +217,7 @@ class SA3DemoControl final : public IControl
   {
     None,
     Prompt,
+    Dice,
     TabGenerate,
     TabTransform,
     TabContinue,
@@ -332,6 +334,7 @@ public:
                                    PromptEntryIndex(mode));
         return;
       }
+      case Hit::Dice:          mPlugin.RollPromptForCurrentMode(); SetDirty(false); return;
       case Hit::TabGenerate:  mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Text); SetDirty(false); return;
       case Hit::TabTransform: mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Transform); SetDirty(false); return;
       case Hit::TabContinue:  mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Continue); SetDirty(false); return;
@@ -462,6 +465,7 @@ private:
 
   HitResult HitTest(float x, float y) const
   {
+    if (mDiceRect.Contains(x, y)) return {Hit::Dice, 0};
     if (mPromptRect.Contains(x, y)) return {Hit::Prompt, 0};
     if (mGenerateTabRect.Contains(x, y)) return {Hit::TabGenerate, 0};
     if (mTransformTabRect.Contains(x, y)) return {Hit::TabTransform, 0};
@@ -509,7 +513,9 @@ private:
     using namespace gary::ui;
     g.DrawText(IText(12.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
                "prompt", IRECT(bounds.L, bounds.T, bounds.L + 80.f, bounds.T + 16.f));
-    mPromptRect = IRECT(bounds.L, bounds.T + 18.f, bounds.R, bounds.B);
+    mDiceRect = IRECT(bounds.R - 34.f, bounds.T + 18.f, bounds.R, bounds.B);
+    DrawIconButton(g, mDiceRect, TransportIcon::Dice);
+    mPromptRect = IRECT(bounds.L, bounds.T + 18.f, mDiceRect.L - 8.f, bounds.B);
     g.FillRoundRect(ButtonFill(), mPromptRect, 3.f);
     g.DrawRoundRect(Frame(), mPromptRect, 3.f);
     g.DrawText(IText(13.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
@@ -591,7 +597,7 @@ private:
     if (loras.empty())
     {
       g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
-                 "no gguf loras imported", IRECT(left, y, right, y + 22.f));
+                 "no loras imported", IRECT(left, y, right, y + 22.f));
       return bounds.B;
     }
 
@@ -612,8 +618,11 @@ private:
       g.DrawRoundRect(lora.enabled ? Red() : Frame(), toggle, 2.f);
       if (lora.enabled)
         g.FillRoundRect(Red(), toggle.GetPadded(-4.f), 1.f);
+      std::string labelText = lora.name;
+      if (!lora.prompts.empty())
+        labelText += " (" + std::to_string(lora.prompts.size()) + ")";
       g.DrawText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-                 CompactText(lora.name, 28).c_str(), label);
+                 CompactText(labelText, 28).c_str(), label);
 
       const IRECT track(slider.L, slider.MH() - 2.f, slider.R, slider.MH() + 2.f);
       const float filled = slider.L + slider.W() * SliderFraction(lora.strength, 0.f, 2.f);
@@ -732,6 +741,7 @@ private:
 
   SA3IPlug2Demo& mPlugin;
   IRECT mPromptRect;
+  IRECT mDiceRect;
   IRECT mGenerateTabRect, mTransformTabRect, mContinueTabRect;
   IRECT mDurationSliderRect, mStepsSliderRect, mNoiseSliderRect;
   IRECT mRunRect, mAddLoraRect;
@@ -853,6 +863,45 @@ void SA3IPlug2Demo::SetPromptForMode(RenderMode mode, const char* text)
 {
   std::lock_guard<std::mutex> lock(mPromptMutex);
   mPrompts[(size_t)ModeIndex(mode)] = text && *text ? text : "";
+}
+
+void SA3IPlug2Demo::RollPromptForCurrentMode()
+{
+  std::vector<std::string> pool;
+  auto addUnique = [&pool](const std::string& prompt) {
+    if (!prompt.empty() && std::find(pool.begin(), pool.end(), prompt) == pool.end())
+      pool.push_back(prompt);
+  };
+
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    for (const auto& lora : mLoras)
+    {
+      if (!lora.enabled || lora.strength <= 0.0f)
+        continue;
+      for (const std::string& prompt : lora.prompts)
+        addUnique(prompt);
+    }
+  }
+
+  const bool usingLoraPrompts = !pool.empty();
+  if (pool.empty())
+  {
+    for (const std::string& prompt : gary::LoadDefaultPromptPool())
+      addUnique(prompt);
+  }
+
+  if (pool.empty())
+  {
+    SetStatus("prompt pool empty");
+    return;
+  }
+
+  std::random_device rd;
+  std::mt19937 rng(rd());
+  std::uniform_int_distribution<size_t> dist(0, pool.size() - 1u);
+  SetPromptForMode(CurrentRenderMode(), pool[dist(rng)].c_str());
+  SetStatus(usingLoraPrompts ? "rolled LoRA prompt" : "rolled default prompt");
 }
 
 std::string SA3IPlug2Demo::Prompt() const
@@ -1056,7 +1105,7 @@ bool SA3IPlug2Demo::ImportLoraFromDialog()
   OPENFILENAMEA ofn = {};
   ofn.lStructSize = sizeof(ofn);
   ofn.hwndOwner = nullptr;
-  ofn.lpstrFilter = "SA3 LoRA (*.gguf;*.ckpt)\0*.gguf;*.ckpt\0GGUF LoRA (*.gguf)\0*.gguf\0Checkpoint LoRA (*.ckpt)\0*.ckpt\0All files\0*.*\0";
+  ofn.lpstrFilter = "SA3 LoRA (*.gguf;*.safetensors;*.ckpt)\0*.gguf;*.safetensors;*.ckpt\0GGUF LoRA (*.gguf)\0*.gguf\0Exported LoRA (*.safetensors)\0*.safetensors\0Checkpoint LoRA (*.ckpt)\0*.ckpt\0All files\0*.*\0";
   ofn.lpstrFile = fileName;
   ofn.nMaxFile = MAX_PATH;
   ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -1074,14 +1123,18 @@ bool SA3IPlug2Demo::ImportLoraFromDialog()
 
   LoraSlot slot;
   slot.path = info.path;
-  slot.name = FileNameFromPath(info.path);
+  slot.name = info.name.empty() ? FileNameFromPath(info.path) : info.name;
+  slot.prompts = info.prompts;
   slot.strength = 1.0f;
   slot.enabled = true;
+  std::string status = "LoRA imported: " + slot.name;
+  if (!slot.prompts.empty())
+    status += " (" + std::to_string(slot.prompts.size()) + " prompts)";
   {
     std::lock_guard<std::mutex> lock(mLoraMutex);
     mLoras.push_back(std::move(slot));
   }
-  SetStatus("LoRA imported: " + FileNameFromPath(info.path));
+  SetStatus(status);
   return true;
 #else
   SetStatus("LoRA file picker is only implemented for Windows in this demo");

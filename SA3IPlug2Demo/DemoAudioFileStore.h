@@ -18,7 +18,9 @@ struct AudioFileInfo
 {
   bool ok = false;
   std::string path;
+  std::string name;
   std::string error;
+  std::vector<std::string> prompts;
   uint64_t bytes = 0;
   int numSamples = 0;
   int sampleRate = 44100;
@@ -30,11 +32,13 @@ std::string RecordingWavPath(std::string* error = nullptr);
 std::string OutputWavPath(std::string* error = nullptr);
 std::string OutputUndoWavPath(std::string* error = nullptr);
 std::string LoraDirectory(std::string* error = nullptr);
+std::string Sa3CppDirectory();
 
 AudioFileInfo SaveRecordingWav(const RecordingSnapshot& snapshot);
 AudioFileInfo SaveOutputWav(const RecordingSnapshot& snapshot);
 AudioFileInfo SaveOutputBase64Audio(const std::string& base64Audio);
 AudioFileInfo ImportLoraFile(const std::string& path);
+std::vector<std::string> LoadDefaultPromptPool();
 bool OutputUndoAvailable();
 AudioFileInfo RestoreOutputUndo();
 AudioFileInfo CreateOutputDragCopy();

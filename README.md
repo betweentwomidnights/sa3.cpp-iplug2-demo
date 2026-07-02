@@ -22,7 +22,15 @@ The demo keeps generated audio at its native `libsa3` sample rate for saving/dra
 
 ## LoRAs
 
-The UI can import `.gguf` LoRA files into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. `.ckpt` LoRA conversion is intentionally not handled in this demo yet; that helper should live in `libsa3`/`sa3.cpp` so other embedded hosts can use the same conversion path.
+The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. `.gguf` files are copied directly. `.safetensors` imports are converted with `C:/dev/sa3.cpp/tools/convert_lora.py` when the matching metadata JSON exists. `.ckpt` imports use the same conversion path after finding the exported `.safetensors`/`.json` pair beside the checkpoint or in the parent LoRA folder.
+
+Raw `.ckpt` export still requires the Python/PyTorch helper in `sa3.cpp` first:
+
+```powershell
+C:\dev\sa3.cpp\.venv\Scripts\python.exe C:\dev\sa3.cpp\tools\lora_ckpt_export.py --ckpt C:\dev\sa3.cpp\loras\kev\kev.ckpt --out C:\dev\sa3.cpp\loras\kev
+```
+
+The dice button beside the prompt field uses prompts from enabled LoRAs when their prompt sidecars are discoverable. The importer looks for `.txt` prompt files in the selected LoRA folder and matching `C:/dev/sa3.cpp/loras/<name>` folder, then falls back to `C:/dev/sa3.cpp/prompts/defaults.json` when no active LoRA prompt pool is available.
 
 The current UI draws the first two imported LoRAs and still keeps additional imported LoRAs queued for renders. This is enough for the demo pass, but a scrollable LoRA list would be the next UI polish step.
 

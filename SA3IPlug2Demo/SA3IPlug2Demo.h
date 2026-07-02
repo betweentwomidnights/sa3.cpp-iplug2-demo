@@ -52,6 +52,7 @@ public:
   {
     std::string name;
     std::string path;
+    std::vector<std::string> prompts;
     float strength = 1.0f;
     bool enabled = true;
   };
@@ -70,6 +71,7 @@ public:
 
   void SetPrompt(const char* text);
   void SetPromptForMode(RenderMode mode, const char* text);
+  void RollPromptForCurrentMode();
   std::string Prompt() const;
   std::string PromptForMode(RenderMode mode) const;
   std::string StatusText() const;

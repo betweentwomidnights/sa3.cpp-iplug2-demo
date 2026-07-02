@@ -48,7 +48,8 @@ enum class TransportIcon
   Stop,
   Crop,
   Undo,
-  Signal
+  Signal,
+  Dice
 };
 
 inline void DrawPlayIcon(IGraphics& g, const IRECT& bounds, const IColor& color)
@@ -137,6 +138,24 @@ inline void DrawSignalBarsIcon(IGraphics& g, const IRECT& bounds, const IColor& 
   g.FillRect(color, IRECT(x(17.f), y(5.f), x(20.f), y(20.f)));
 }
 
+inline void DrawDiceIcon(IGraphics& g, const IRECT& bounds, const IColor& color)
+{
+  const IRECT b = bounds.GetPadded(-4.f);
+  g.DrawRoundRect(color, b, 2.f, nullptr, 1.7f);
+  const float r = std::max(1.2f, std::min(b.W(), b.H()) * 0.055f);
+  const float x1 = b.L + b.W() * 0.30f;
+  const float x2 = b.L + b.W() * 0.50f;
+  const float x3 = b.L + b.W() * 0.70f;
+  const float y1 = b.T + b.H() * 0.30f;
+  const float y2 = b.T + b.H() * 0.50f;
+  const float y3 = b.T + b.H() * 0.70f;
+  g.FillCircle(color, x1, y1, r);
+  g.FillCircle(color, x3, y1, r);
+  g.FillCircle(color, x2, y2, r);
+  g.FillCircle(color, x1, y3, r);
+  g.FillCircle(color, x3, y3, r);
+}
+
 inline void DrawGaryLogo(IGraphics& g, const IRECT& bounds)
 {
   const IRECT b = bounds.GetPadded(-1.f);
@@ -198,6 +217,9 @@ inline void DrawIconButton(IGraphics& g, const IRECT& bounds, TransportIcon icon
       break;
     case TransportIcon::Signal:
       DrawSignalBarsIcon(g, iconBounds, iconColor);
+      break;
+    case TransportIcon::Dice:
+      DrawDiceIcon(g, iconBounds, iconColor);
       break;
   }
 }
