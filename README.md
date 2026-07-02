@@ -13,6 +13,7 @@ The demo keeps generated audio at its native `libsa3` sample rate for saving/dra
 - `transform` uses the source audio plus the transform-only init-noise slider.
 - `continue` uses the source audio as inpaint context and treats the duration slider as the desired total length.
 - The source waveform lives above the render controls, and generated output lives below them with play/stop/save/drag-out support.
+- The editor uses a tall `420x920` layout so it can sit beside a DAW timeline without consuming as much horizontal space.
 
 ## Layout
 

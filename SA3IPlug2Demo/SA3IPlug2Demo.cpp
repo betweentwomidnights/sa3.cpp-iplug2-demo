@@ -40,6 +40,12 @@ std::string CompactText(std::string text, size_t maxChars)
   return text.substr(0, maxChars - 3) + "...";
 }
 
+size_t FitChars(float width, float approxCharWidth, size_t minChars, size_t maxChars)
+{
+  const size_t fitted = static_cast<size_t>(std::max(1.f, width / std::max(1.f, approxCharWidth)));
+  return std::clamp(fitted, minChars, maxChars);
+}
+
 std::string FileNameFromPath(const std::string& path)
 {
   const auto slash = path.find_last_of("\\/");
@@ -275,7 +281,7 @@ public:
     g.DrawText(IText(20.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
                "sa3 embedded", IRECT(left, y, shell.MW(), y + 26.f));
     g.DrawText(IText(12.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               mPlugin.ModelsDir().c_str(), IRECT(shell.MW(), y, right, y + 26.f));
+               CompactText(mPlugin.ModelsDir(), FitChars(right - shell.MW(), 6.5f, 12, 42)).c_str(), IRECT(shell.MW(), y, right, y + 26.f));
     y += 30.f;
 
     const float progress = std::clamp(mPlugin.Progress(), 0.f, 1.f);
@@ -285,12 +291,12 @@ public:
       g.FillRoundRect(RedDim(), IRECT(statusRect.L, statusRect.T, statusRect.L + statusRect.W() * progress, statusRect.B), 3.f);
     g.DrawRoundRect(FrameSoft(), statusRect, 3.f);
     g.DrawText(IText(12.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(mPlugin.StatusText(), 96).c_str(), statusRect.GetPadded(-8.f));
+               CompactText(mPlugin.StatusText(), FitChars(statusRect.W() - 16.f, 6.5f, 18, 96)).c_str(), statusRect.GetPadded(-8.f));
     y += 30.f;
 
-    const IRECT sourceRect(left, y, right, y + 112.f);
+    const IRECT sourceRect(left, y, right, y + 148.f);
     DrawWaveformPanel(g, sourceRect, "source", mPlugin.SourceStatusText(), mPlugin.SourceWaveform((int)sourceRect.W()), false);
-    y += 122.f;
+    y += 158.f;
 
     DrawTabs(g, IRECT(left, y, right, y + 30.f), mode);
     y += 40.f;
@@ -299,7 +305,7 @@ public:
     y += 56.f;
 
     y = DrawModeControls(g, IRECT(left, y, right, y + 72.f), mode) + 8.f;
-    y = DrawLoraPanel(g, IRECT(left, y, right, y + 82.f)) + 8.f;
+    y = DrawLoraPanel(g, IRECT(left, y, right, y + 108.f)) + 8.f;
 
     mRunRect = IRECT(left, y, left + 180.f, y + 32.f);
     DrawButton(g, mRunRect, mPlugin.Busy() ? "cancel" : ActionLabel(mode), kDemoFont);
@@ -519,7 +525,7 @@ private:
     g.FillRoundRect(ButtonFill(), mPromptRect, 3.f);
     g.DrawRoundRect(Frame(), mPromptRect, 3.f);
     g.DrawText(IText(13.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(mPlugin.PromptForMode(mode), 118).c_str(), mPromptRect.GetPadded(-8.f));
+               CompactText(mPlugin.PromptForMode(mode), FitChars(mPromptRect.W() - 16.f, 7.f, 14, 118)).c_str(), mPromptRect.GetPadded(-8.f));
   }
 
   float SliderFraction(float value, float minValue, float maxValue) const
@@ -622,7 +628,7 @@ private:
       if (!lora.prompts.empty())
         labelText += " (" + std::to_string(lora.prompts.size()) + ")";
       g.DrawText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-                 CompactText(labelText, 28).c_str(), label);
+                 CompactText(labelText, FitChars(label.W(), 6.f, 10, 42)).c_str(), label);
 
       const IRECT track(slider.L, slider.MH() - 2.f, slider.R, slider.MH() + 2.f);
       const float filled = slider.L + slider.W() * SliderFraction(lora.strength, 0.f, 2.f);
@@ -713,15 +719,20 @@ private:
     const double seconds = wf.numSamples > 0 ? (double)wf.numSamples / std::max(1, wf.sampleRate) : 0.0;
     char detail[160] = {};
     std::snprintf(detail, sizeof(detail), "%.2fs @ %d Hz", seconds, std::max(1, wf.sampleRate));
+    const IRECT detailRect(bounds.MW(), bounds.T + 8.f, bounds.R - 12.f, bounds.T + 28.f);
+    const std::string detailText = wf.numSamples > 0
+                                 ? std::string(detail)
+                                 : CompactText(status, FitChars(detailRect.W(), 6.f, 10, 64));
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               wf.numSamples > 0 ? detail : status.c_str(), IRECT(bounds.MW(), bounds.T + 8.f, bounds.R - 12.f, bounds.T + 28.f));
+               detailText.c_str(), detailRect);
 
-    const IRECT wfRect(bounds.L + 12.f, bounds.T + 34.f, bounds.R - 12.f, bounds.B - (output ? 48.f : 12.f));
+    const IRECT wfRect(bounds.L + 12.f, bounds.T + 34.f, bounds.R - 12.f, bounds.B - (output ? 48.f : 36.f));
     if (output) mOutputWaveformRect = wfRect;
     DrawWaveform(g, wfRect, wf, Red());
     if (!output)
       g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle),
-                 status.c_str(), IRECT(bounds.L + 12.f, bounds.B - 28.f, bounds.R - 12.f, bounds.B - 10.f));
+                 CompactText(status, FitChars(bounds.W() - 24.f, 6.f, 16, 72)).c_str(),
+                 IRECT(bounds.L + 12.f, bounds.B - 28.f, bounds.R - 12.f, bounds.B - 10.f));
   }
 
   void DrawOutputPanel(IGraphics& g, const IRECT& bounds)
@@ -736,7 +747,8 @@ private:
     DrawIconButton(g, mOutputStopRect, TransportIcon::Stop);
     DrawButton(g, mOutputSaveRect, "save wav", kDemoFont);
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               mPlugin.OutputStatusText().c_str(), IRECT(mOutputSaveRect.R + 8.f, y, bounds.R - 12.f, y + 30.f));
+               CompactText(mPlugin.OutputStatusText(), FitChars(bounds.R - mOutputSaveRect.R - 20.f, 6.f, 8, 64)).c_str(),
+               IRECT(mOutputSaveRect.R + 8.f, y, bounds.R - 12.f, y + 30.f));
   }
 
   SA3IPlug2Demo& mPlugin;
