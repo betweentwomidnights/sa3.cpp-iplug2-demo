@@ -1479,6 +1479,18 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     return;
   }
 
+  auto cancelled = [this, requestId]() {
+    return mCancelRequested.load(std::memory_order_acquire)
+           || requestId != mRequestId.load(std::memory_order_acquire);
+  };
+
+  if (cancelled())
+  {
+    mCancelRequested.store(false, std::memory_order_release);
+    finish("render cancelled", true);
+    return;
+  }
+
   char err[1024] = {};
   if (!mContext)
   {
@@ -1492,6 +1504,14 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     if (!mContext)
     {
       finish(std::string("sa3_init failed: ") + err);
+      return;
+    }
+    if (cancelled())
+    {
+      sa3->freeContext(mContext);
+      mContext = nullptr;
+      mCancelRequested.store(false, std::memory_order_release);
+      finish("render cancelled", true);
       return;
     }
   }
@@ -1574,9 +1594,7 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   const int rc = sa3->generateEx(mContext, &req, &audio, err, (int)sizeof err);
   if (rc != 0)
   {
-    const bool cancelled = mCancelRequested.load(std::memory_order_acquire)
-                           || requestId != mRequestId.load(std::memory_order_acquire);
-    if (cancelled)
+    if (cancelled())
     {
       mCancelRequested.store(false, std::memory_order_release);
       finish("render cancelled", true);
@@ -1588,8 +1606,7 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     return;
   }
 
-  if (mCancelRequested.load(std::memory_order_acquire)
-      || requestId != mRequestId.load(std::memory_order_acquire))
+  if (cancelled())
   {
     sa3->freeAudio(&audio);
     mCancelRequested.store(false, std::memory_order_release);
