@@ -61,11 +61,13 @@ public:
   ~SA3IPlug2Demo() override;
 
 #if IPLUG_DSP
+  void OnActivate(bool active) override;
   void OnReset() override;
   void ProcessBlock(sample** inputs, sample** outputs, int nFrames) override;
 #endif
 
 #if IPLUG_EDITOR
+  void OnUIClose() override;
   void OnIdle() override;
 #endif
 

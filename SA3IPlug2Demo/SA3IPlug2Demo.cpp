@@ -305,7 +305,8 @@ public:
     y += 56.f;
 
     y = DrawModeControls(g, IRECT(left, y, right, y + 72.f), mode) + 8.f;
-    y = DrawLoraPanel(g, IRECT(left, y, right, y + 108.f)) + 8.f;
+    const float loraPanelHeight = mPlugin.Loras().empty() ? 76.f : 108.f;
+    y = DrawLoraPanel(g, IRECT(left, y, right, y + loraPanelHeight)) + 8.f;
 
     mRunRect = IRECT(left, y, left + 180.f, y + 32.f);
     DrawButton(g, mRunRect, mPlugin.Busy() ? "cancel" : ActionLabel(mode), kDemoFont);
@@ -314,7 +315,8 @@ public:
                IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
     y += 42.f;
 
-    const IRECT outputRect(left, y, right, shell.B - 14.f);
+    const float outputHeight = std::min(250.f, std::max(160.f, shell.B - y - 14.f));
+    const IRECT outputRect(left, y, right, y + outputHeight);
     DrawOutputPanel(g, outputRect);
   }
 
@@ -333,11 +335,15 @@ public:
       {
         const auto mode = mPlugin.CurrentRenderMode();
         if (GetUI())
+        {
+          const IText promptEntryText = IText(14.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle)
+                                          .WithTEColors(gary::ui::PanelDark(), COLOR_WHITE);
           GetUI()->CreateTextEntry(*this,
-                                   IText(14.f, COLOR_WHITE, kDemoFont),
+                                   promptEntryText,
                                    mPromptRect,
                                    mPlugin.PromptForMode(mode).c_str(),
                                    PromptEntryIndex(mode));
+        }
         return;
       }
       case Hit::Dice:          mPlugin.RollPromptForCurrentMode(); SetDirty(false); return;
@@ -785,6 +791,7 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
   mLayoutFunc = [&](IGraphics* pGraphics) {
     pGraphics->AttachPanelBackground(COLOR_BLACK);
     pGraphics->EnableMouseOver(true);
+    pGraphics->AttachTextEntryControl();
     if (!pGraphics->LoadFont(kDemoFont, ROBOTO_FN))
       pGraphics->LoadFont(kDemoFont, "Arial", ETextStyle::Normal);
     pGraphics->AttachControl(new SA3DemoControl(pGraphics->GetBounds(), *this), kCtrlTagMain);
@@ -815,6 +822,12 @@ SA3IPlug2Demo::~SA3IPlug2Demo()
 }
 
 #if IPLUG_DSP
+void SA3IPlug2Demo::OnActivate(bool active)
+{
+  if (!active)
+    CancelRender();
+}
+
 void SA3IPlug2Demo::OnReset()
 {
   const int hostRate = std::max(1, (int)(GetSampleRate() + 0.5));
@@ -858,6 +871,11 @@ void SA3IPlug2Demo::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 #endif
 
 #if IPLUG_EDITOR
+void SA3IPlug2Demo::OnUIClose()
+{
+  CancelRender();
+}
+
 void SA3IPlug2Demo::OnIdle()
 {
   if (auto* ui = GetUI())

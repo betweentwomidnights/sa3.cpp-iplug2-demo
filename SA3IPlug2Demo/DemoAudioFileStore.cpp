@@ -77,6 +77,87 @@ std::string Trim(std::string text)
   return std::string(begin, end);
 }
 
+bool SegmentHasBpm(const std::string& segment)
+{
+  const std::string lower = ToLower(segment);
+  const size_t bpm = lower.find("bpm");
+  if (bpm == std::string::npos)
+    return false;
+
+  for (size_t i = bpm; i > 0; --i)
+  {
+    const unsigned char c = static_cast<unsigned char>(lower[i - 1u]);
+    if (std::isdigit(c) != 0)
+      return true;
+    if (std::isspace(c) == 0 && c != '-' && c != '_' && c != '.')
+      return false;
+  }
+  return false;
+}
+
+bool SegmentLooksLikeKey(const std::string& segment)
+{
+  const std::string trimmed = Trim(segment);
+  if (trimmed.empty() || trimmed.size() > 24u)
+    return false;
+
+  const std::string lower = ToLower(trimmed);
+  const char root = lower[0];
+  if (root < 'a' || root > 'g')
+    return false;
+
+  size_t pos = 1u;
+  while (pos < lower.size() && std::isspace(static_cast<unsigned char>(lower[pos])) != 0)
+    ++pos;
+
+  if (pos < lower.size() && (lower[pos] == '#' || lower[pos] == 'b'))
+    ++pos;
+  else if (lower.compare(pos, 5u, "sharp") == 0u)
+    pos += 5u;
+  else if (lower.compare(pos, 4u, "flat") == 0u)
+    pos += 4u;
+
+  while (pos < lower.size() && std::isspace(static_cast<unsigned char>(lower[pos])) != 0)
+    ++pos;
+
+  if (lower.compare(pos, 5u, "major") == 0u)
+    pos += 5u;
+  else if (lower.compare(pos, 5u, "minor") == 0u)
+    pos += 5u;
+  else
+    return false;
+
+  while (pos < lower.size() && std::isspace(static_cast<unsigned char>(lower[pos])) != 0)
+    ++pos;
+  return pos == lower.size();
+}
+
+std::string StripPromptMetadata(std::string prompt)
+{
+  std::vector<std::string> kept;
+  size_t start = 0u;
+  while (start <= prompt.size())
+  {
+    const size_t comma = prompt.find(',', start);
+    std::string segment = Trim(prompt.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+    if (!segment.empty() && !SegmentHasBpm(segment) && !SegmentLooksLikeKey(segment))
+      kept.push_back(std::move(segment));
+
+    if (comma == std::string::npos)
+      break;
+    start = comma + 1u;
+  }
+
+  std::string stripped;
+  for (const auto& segment : kept)
+  {
+    if (!stripped.empty())
+      stripped += ", ";
+    stripped += segment;
+  }
+  return Trim(std::move(stripped));
+}
+
 std::string DirectoryOnly(const std::string& path)
 {
   const size_t slash = path.find_last_of("\\/");
@@ -139,6 +220,7 @@ void AddUniquePrompt(std::vector<std::string>& prompts, std::string prompt)
     prompt.erase(0, 3);
     prompt = Trim(std::move(prompt));
   }
+  prompt = StripPromptMetadata(std::move(prompt));
   if (prompt.empty())
     return;
   if (std::find(prompts.begin(), prompts.end(), prompt) == prompts.end())
