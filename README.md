@@ -108,9 +108,25 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSA3_BUILD_DIR=<sa3.cpp>\
 
 Set `SA3_MODELS_DIR` at runtime to override the default model directory.
 
+## builds & releases
+
+the backend is decided by which `sa3.cpp` build you point the plugin at (`SA3_BUILD_DIR`) — the plugin just bundles
+that backend's DLLs:
+
+- **cuda** — nvidia only, fastest; bundles the cuda runtime.
+- **vulkan** — runs on any GPU (amd / intel / nvidia), no cuda runtime, slightly slower. `-DSA3_BUILD_DIR=<sa3.cpp>/build-vulkan`.
+- **metal** — apple silicon, built on a mac.
+
+right now we ship zips of the **cuda** and **vulkan** windows builds to github releases with a big **"plz help us
+figure out what's working"** disclaimer — this is a demo, not a product. the vulkan build is freshly validated and
+works, but i can't cleanly A/B it against cuda yet: **the same seed produces a different-but-valid result on each
+backend** (the tensor-core matmuls accumulate differently — see sa3.cpp's cross-backend note). so if something sounds
+off (e.g. a silence gap), it's genuinely hard to tell whether it's the backend or just the model doing its thing.
+bug reports very welcome.
+
 ## Backend notes
 
-The CMake defaults prefer `<sa3.cpp>/build-cuda` when that build contains `sa3.lib` and `ggml-cuda.dll`. Runtime DLLs are copied beside the standalone app and VST3 binary after build, including `sa3.dll`, `ggml*.dll`, and the CUDA runtime DLLs found under `SA3_CUDA_RUNTIME_DIR`.
+The CMake defaults prefer `<sa3.cpp>/build-cuda` when that build contains `sa3.lib` and `ggml-cuda.dll`. Runtime DLLs are copied beside the standalone app and VST3 binary after build. The CUDA runtime DLLs (`cudart`/`cublas`) are bundled **only** when the selected build ships `ggml-cuda.dll` — a vulkan/metal/cpu build produces a clean backend-only bundle.
 
 If the demo feels CPU-bound, confirm that `SA3_BUILD_DIR` points at the CUDA-enabled `sa3.cpp` build and that `ggml-cuda.dll`, `cudart64_*.dll`, `cublas64_*.dll`, and `cublasLt64_*.dll` are present beside the built app/VST3 binary.
 
