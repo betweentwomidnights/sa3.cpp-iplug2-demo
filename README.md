@@ -3,7 +3,7 @@
 this is just an example vst for exploring and validating **libsa3** from
 [sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp).
 
-i don't rly expect to maintain this project much, because we may end up rolling it into an IPlug2 version of
+i don't rly expect to maintain this project much, because we may end up rolling it into an iPlug2 version of
 [gary4juce](https://github.com/betweentwomidnights/gary4juce) (aka gary-in-the-plug).
 
 i'm still not sure if i prefer embedding the model directly inside a vst like this, and may instead continue to
