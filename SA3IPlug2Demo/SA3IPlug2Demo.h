@@ -4,6 +4,7 @@
 #include "IPlug_include_in_plug_hdr.h"
 #include "libsa3.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -45,6 +46,7 @@ public:
     int numSamples = 0;
     int sampleRate = 44100;
     int playheadSamples = 0;
+    int savedSamples = 0;   // source only: samples up to the frozen "save buffer" point (drawn bright)
     bool active = false;
   };
 
@@ -92,8 +94,10 @@ public:
   void SetUseSeed(bool useSeed);
   void ToggleUseSeed();
   void SetSeedValue(int64_t seed);
-  int DurationSeconds() const noexcept { return mDurationSeconds.load(std::memory_order_acquire); }
+  int DurationSeconds() const noexcept { return mDurationSeconds[(size_t)mCurrentMode.load(std::memory_order_acquire)].load(std::memory_order_acquire); }
   int Steps() const noexcept { return mSteps.load(std::memory_order_acquire); }
+  float CfgScale() const noexcept { return mCfgScale.load(std::memory_order_acquire); }   // 1.0 = off (single pass)
+  void SetCfgScale(float v) { mCfgScale.store(std::clamp(v, 0.5f, 2.0f), std::memory_order_release); }
   float InitNoiseLevel() const noexcept { return mInitNoiseLevel.load(std::memory_order_acquire); }
   bool UseSeed() const noexcept { return mUseSeed.load(std::memory_order_acquire); }
   int64_t SeedValue() const noexcept { return mSeedValue.load(std::memory_order_acquire); }
@@ -104,10 +108,39 @@ public:
   bool TransportRunning() const noexcept { return mTransportRunning.load(std::memory_order_acquire); }
   bool OutputPlaying() const noexcept { return mOutputPlaying.load(std::memory_order_acquire); }
 
+  // A frozen init snapshot (myBuffer.wav) exists — set by dropping audio or "save buffer", persisted across
+  // sessions. transform/continue use this snapshot as init audio and are disabled until it exists.
+  bool HasInit() const noexcept { return mHasInit.load(std::memory_order_acquire); }
+  bool CanRender(RenderMode mode) const noexcept { return mode == RenderMode::Text || HasInit(); }
+
+  // Musical controls (appended to the prompt; loop drives an exact bar length in Text mode).
+  double HostTempo() const noexcept { return mHostTempo.load(std::memory_order_acquire); }
+  double Bpm() const noexcept { return mBpm.load(std::memory_order_acquire); }   // effective bpm (host or user)
+  bool BpmOverridden() const noexcept { return mBpmOverride.load(std::memory_order_acquire); }
+  void AdjustBpm(double delta)   // standalone: drag to set; flips to a user override
+  {
+    mBpmOverride.store(true, std::memory_order_release);
+    mBpm.store(std::clamp(mBpm.load(std::memory_order_acquire) + delta, 20.0, 300.0), std::memory_order_release);
+  }
+  void ClearBpmOverride() { mBpmOverride.store(false, std::memory_order_release); }   // resume following host
+  bool AppendBpm() const noexcept { return mAppendBpm.load(std::memory_order_acquire); }
+  void ToggleAppendBpm() { mAppendBpm.store(!AppendBpm(), std::memory_order_release); }
+  int KeyRoot() const noexcept { return mKeyRoot.load(std::memory_order_acquire); }   // 0=none, 1..12=C..B
+  int KeyMode() const noexcept { return mKeyMode.load(std::memory_order_acquire); }   // 0=major, 1=minor
+  void SetKeyRoot(int root) { mKeyRoot.store(std::clamp(root, 0, 12), std::memory_order_release); }
+  void SetKeyMode(int scaleMode) { mKeyMode.store(scaleMode ? 1 : 0, std::memory_order_release); }
+  int LoopBars() const noexcept { return mLoopBars.load(std::memory_order_acquire); } // 0=off, 4/8/16
+  void SetLoopBars(int bars) { mLoopBars.store((bars == 4 || bars == 8 || bars == 16) ? bars : 0, std::memory_order_release); }
+  std::string KeyScaleText() const;   // "" when root=none, else "C minor"
+  int DistShift() const noexcept { return mDistShift.load(std::memory_order_acquire); }   // 0=LogSNR,1=Flux,2=Full,3=None
+  void SetDistShift(int idx) { mDistShift.store(std::clamp(idx, 0, 3), std::memory_order_release); }
+  const char* DistShiftName() const;  // libsa3 dist_shift string for the current index (default LogSNR)
+
   void StartRender(RenderMode mode);
   void CancelRender();
   bool LoadDroppedAudioFile(const char* rawPath);
   bool SaveOutputToDisk();
+  bool SaveSourceToDisk();   // save the recording/source buffer to myBuffer.wav (gary4juce "save buffer")
   gary::AudioFileInfo CreateOutputDragCopy();
   bool ImportLoraFromDialog();
   void RemoveLora(size_t index);
@@ -132,9 +165,13 @@ private:
     RenderMode mode = RenderMode::Text;
     int durationSeconds = 12;
     int steps = 8;
+    float cfgScale = 1.0f;
     float initNoiseLevel = 0.85f;
     bool useSeed = false;
     int64_t seed = 0;
+    double bpm = 0.0;       // host tempo captured at request time (0 = unknown)
+    int loopBars = 0;       // 0 = off; 4/8/16 = generate an exact bar-length loop (Text mode only)
+    int distShift = 0;      // 0=LogSNR,1=Flux,2=Full,3=None (libsa3 schedule warp)
     std::vector<std::vector<float>> sourceChannels;
     int sourceSamples = 0;
     int sourceSampleRate = 44100;
@@ -146,6 +183,7 @@ private:
   void RebuildOutputPlaybackBufferFromNativeLocked(int hostSampleRate);
   void StartAutoRecording();
   void StopAutoRecording();
+  void LoadPersistedBuffer();   // restore myBuffer.wav into the frozen snapshot on startup
   void CopyInputToRecordBuffer(sample** inputs, int nInChans, int nFrames);
   void MixOutputPlayback(sample** outputs, int nOutChans, int nFrames);
   RenderInput CaptureRenderInput(RenderMode mode);
@@ -154,16 +192,14 @@ private:
   void SetStatus(const std::string& text);
   void SetSourceStatus(const std::string& text);
   void SetOutputStatus(const std::string& text);
-  void InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate);
+  void InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate, int keepSamples = -1);
   gary::RecordingSnapshot SourceSnapshotForSA3(const RenderInput& input) const;
   static std::string NormalizeDroppedPath(const char* rawPath);
 
   mutable std::mutex mPromptMutex;
-  std::array<std::string, 3> mPrompts = {
-    "bright electronic loop with warm drums and melodic synths",
-    "make this source audio brighter, wider, and more rhythmic",
-    "continue this idea into a clean musical ending"
-  };
+  // empty by default: SA3 describes the music the same way for generate/transform/continue, and unprompted
+  // generation is a valid (LoRA-friendly) mode. The dice rolls in real prompts; a greyed placeholder invites typing.
+  std::array<std::string, 3> mPrompts = { "", "", "" };
 
   mutable std::mutex mStatusMutex;
   std::string mStatus = "idle";
@@ -171,9 +207,10 @@ private:
   std::string mOutputStatus = "no output yet";
 
   std::atomic<int> mCurrentMode{0};
-  std::atomic<int> mDurationSeconds{12};
+  std::array<std::atomic<int>, 3> mDurationSeconds{};   // per mode (text/transform/continue); set in ctor
   std::atomic<int> mSteps{8};
-  std::atomic<float> mInitNoiseLevel{0.85f};
+  std::atomic<float> mCfgScale{1.0f};
+  std::atomic<float> mInitNoiseLevel{0.5f};   // transform default: mid-strength (LogSNR front-loads noise)
   std::atomic<bool> mUseSeed{false};
   std::atomic<int64_t> mSeedValue{0};
   std::atomic<int64_t> mLastSeed{0};
@@ -181,13 +218,27 @@ private:
   std::atomic<float> mProgress{0.0f};
   std::atomic<bool> mBusy{false};
   std::atomic<bool> mTransportRunning{false};
+  std::atomic<double> mHostTempo{120.0};
+  std::atomic<double> mBpm{120.0};
+  std::atomic<bool> mBpmOverride{false};
+  std::atomic<bool> mAppendBpm{true};
+  std::atomic<int> mKeyRoot{0};
+  std::atomic<int> mKeyMode{0};
+  std::atomic<int> mLoopBars{0};
+  std::atomic<int> mDistShift{0};
 
   mutable std::mutex mSourceMutex;
-  std::vector<std::vector<float>> mSourceBuffer;
+  std::vector<std::vector<float>> mSourceBuffer;   // live scratch pad: clears + regrows each transport play
   int mSourceSamples = 0;
   int mSourceSampleRate = 44100;
   int mRecordWritePosition = 0;
   bool mWasTransportRunning = false;
+  // frozen init snapshot (== myBuffer.wav) used as init audio for transform/continue; guarded by mSourceMutex
+  std::vector<std::vector<float>> mInitBuffer;
+  int mInitSamples = 0;
+  int mInitSampleRate = 44100;
+  std::atomic<int> mSavedSamples{0};   // bright/dim boundary within the live scratch buffer
+  std::atomic<bool> mHasInit{false};
 
   mutable std::mutex mOutputMutex;
   std::vector<std::vector<float>> mOutputBuffer;

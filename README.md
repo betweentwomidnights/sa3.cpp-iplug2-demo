@@ -1,19 +1,37 @@
 # sa3-iplug2-demo
 
-Small IPlug2 experiment for validating `libsa3` embedded directly in a plugin.
+this is just an example vst for exploring and validating **libsa3** from
+[sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp).
 
-This repo intentionally stays separate from `gary-in-the-plug`. It reuses a few UI/audio-file helpers from that project, but the audio generation path calls `libsa3` in-process rather than going through HTTP.
+i don't rly expect to maintain this project much, because we may end up rolling it into an IPlug2 version of
+[gary4juce](https://github.com/betweentwomidnights/gary4juce) (aka gary-in-the-plug).
 
-The demo keeps generated audio at its native `libsa3` sample rate for saving/dragging into a DAW, and creates a separate host-rate playback copy for auditioning inside the plug-in.
+i'm still not sure if i prefer embedding the model directly inside a vst like this, and may instead continue to
+use a "companion application" such as
+[gary4local](https://github.com/betweentwomidnights/gary-localhost-installer) for use inside the DAW. there are
+trade-offs to both. and because you need a separate application to train LoRAs anyway, the companion app still
+makes a whole lot of sense.
+
+for now this is just a demo. it helped us find gaps in the libsa3 package and the underlying pipeline.
+
+if you do want to build this project and play with it, here's claude doing his best to tell you how:
+
+---
+
+The one thing worth calling out up front: unlike gary4juce (which talks to a local server over HTTP), this plugin
+calls `libsa3` **in-process** — embedding the model directly in the plugin is the whole point of the experiment.
+It reuses a few UI/audio-file helpers from gary-in-the-plug.
 
 ## Current scope
 
 - `generate`, `transform`, and `continue` are separate tabs with separate prompt text.
-- `generate` creates audio from text only.
+- `generate` creates audio from text only. With `loop` on it generates an exact `4`/`8`/`16`-bar loop (length derived from BPM).
 - `transform` uses the source audio plus the transform-only init-noise slider.
 - `continue` uses the source audio as inpaint context and treats the duration slider as the desired total length.
-- The source waveform lives above the render controls, and generated output lives below them with play/stop/save/drag-out support.
-- The editor uses a tall `420x920` layout so it can sit beside a DAW timeline without consuming as much horizontal space.
+- Shared controls: duration/steps sliders; a seed field (`random`, or lock a seed to reproduce a render); a `shift` dropdown for the sampler distribution shift (`LogSNR`/`Flux`/`Full`/`None`, exposed through `libsa3`); and `bpm` + `key`/scale that get appended to the prompt. BPM follows the host tempo in a DAW and is drag-adjustable in the standalone.
+- LoRAs can be imported and blended (see below).
+- The source waveform lives above the render controls with a `save buffer` button; generated output lives below with play/stop + drag-out. Output auto-saves to `myOutput.wav` after each render, so there's no manual output-save button.
+- The editor uses a tall `420x944` layout so it can sit beside a DAW timeline without consuming as much horizontal space.
 
 ## Layout
 
@@ -23,15 +41,17 @@ The demo keeps generated audio at its native `libsa3` sample rate for saving/dra
 
 ## LoRAs
 
-The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. `.gguf` files are copied directly. `.safetensors` imports are converted with `C:/dev/sa3.cpp/tools/convert_lora.py` when the matching metadata JSON exists. `.ckpt` imports use the same conversion path after finding the exported `.safetensors`/`.json` pair beside the checkpoint or in the parent LoRA folder.
+Paths below use `<sa3.cpp>` for your sa3.cpp checkout (the `SA3_CPP_DIR` you configured — a sibling checkout by default).
+
+The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. `.gguf` files are copied directly. `.safetensors` imports are converted with `<sa3.cpp>/tools/convert_lora.py` when the matching metadata JSON exists. `.ckpt` imports use the same conversion path after finding the exported `.safetensors`/`.json` pair beside the checkpoint or in the parent LoRA folder.
 
 Raw `.ckpt` export still requires the Python/PyTorch helper in `sa3.cpp` first:
 
 ```powershell
-C:\dev\sa3.cpp\.venv\Scripts\python.exe C:\dev\sa3.cpp\tools\lora_ckpt_export.py --ckpt C:\dev\sa3.cpp\loras\kev\kev.ckpt --out C:\dev\sa3.cpp\loras\kev
+<sa3.cpp>\.venv\Scripts\python.exe <sa3.cpp>\tools\lora_ckpt_export.py --ckpt <sa3.cpp>\loras\kev\kev.ckpt --out <sa3.cpp>\loras\kev
 ```
 
-The dice button beside the prompt field uses prompts from enabled LoRAs when their prompt sidecars are discoverable. The importer looks for `.txt` prompt files in the selected LoRA folder and matching `C:/dev/sa3.cpp/loras/<name>` folder, then falls back to `C:/dev/sa3.cpp/prompts/defaults.json` when no active LoRA prompt pool is available.
+The dice button beside the prompt field uses prompts from enabled LoRAs when their prompt sidecars are discoverable. The importer looks for `.txt` prompt files in the selected LoRA folder and matching `<sa3.cpp>/loras/<name>` folder, then falls back to `<sa3.cpp>/prompts/defaults.json` when no active LoRA prompt pool is available.
 
 The current UI draws the first two imported LoRAs and still keeps additional imported LoRAs queued for renders. This is enough for the demo pass, but a scrollable LoRA list would be the next UI polish step.
 
@@ -43,31 +63,54 @@ Dropped source audio is decoded from WAV/MP3 and converted to the current host r
 
 ## Build
 
-The default CMake cache expects:
+### 1. Get the sources (iPlug2 is a submodule)
 
-- IPlug2 at `C:/dev/gary-in-the-plug/vendor/iPlug2`
-- `sa3.cpp` at `C:/dev/sa3.cpp`
-- a Release `sa3.cpp` build. It prefers `C:/dev/sa3.cpp/build-cuda` when present, then falls back to `C:/dev/sa3.cpp/build`.
-- CUDA runtime DLLs under `%CUDA_PATH%/bin` when using the CUDA `sa3.cpp` build.
-
-Configure and build with Visual Studio:
+iPlug2 is vendored as a git submodule at `vendor/iPlug2`, pinned to a small fork of the official repo
+(`betweentwomidnights/iPlug2` @ `sa3-demo-tempo`) that adds one required VST3 change — it requests the host
+tempo/transport/music-time process context so `GetTempo()` works inside a DAW (needed for the BPM/loop features).
 
 ```powershell
-cmake -S C:\dev\sa3-iplug2-demo -B C:\dev\sa3-iplug2-demo\build -G "Visual Studio 17 2022" -A x64
-cmake --build C:\dev\sa3-iplug2-demo\build --config Release
+git clone --recurse-submodules <this-repo-url>
+# or, if already cloned:  git submodule update --init --recursive
+```
+
+Then fetch iPlug2's SDK dependencies (VST3 SDK, NanoVG, etc.) — these are downloaded artifacts, not in git.
+Run the standard iPlug2 downloader from **git-bash** (Windows has no `.ps1` variant):
+
+```bash
+cd vendor/iPlug2/Dependencies/IPlug && ./download-iplug-sdks.sh
+```
+
+### 2. Point at sa3.cpp
+
+The default CMake cache expects:
+
+- `sa3.cpp` at a sibling checkout (`../sa3.cpp`); override with `-DSA3_CPP_DIR=...`
+- a Release `sa3.cpp` build. It prefers `<sa3.cpp>/build-cuda` when present, then falls back to `<sa3.cpp>/build`.
+- CUDA runtime DLLs under `%CUDA_PATH%/bin` when using the CUDA `sa3.cpp` build.
+
+`IPLUG2_DIR` now defaults to the bundled `vendor/iPlug2` submodule; override it only if you want a different iPlug2 checkout.
+
+### 3. Configure and build with Visual Studio:
+
+Run from the repo root:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
 ```
 
 To force a specific `libsa3` build:
 
 ```powershell
-cmake -S C:\dev\sa3-iplug2-demo -B C:\dev\sa3-iplug2-demo\build -G "Visual Studio 17 2022" -A x64 -DSA3_BUILD_DIR=C:\dev\sa3.cpp\build-cuda
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSA3_BUILD_DIR=<sa3.cpp>\build-cuda
 ```
 
 Set `SA3_MODELS_DIR` at runtime to override the default model directory.
 
 ## Backend notes
 
-The CMake defaults prefer `C:/dev/sa3.cpp/build-cuda` when that build contains `sa3.lib` and `ggml-cuda.dll`. Runtime DLLs are copied beside the standalone app and VST3 binary after build, including `sa3.dll`, `ggml*.dll`, and the CUDA runtime DLLs found under `SA3_CUDA_RUNTIME_DIR`.
+The CMake defaults prefer `<sa3.cpp>/build-cuda` when that build contains `sa3.lib` and `ggml-cuda.dll`. Runtime DLLs are copied beside the standalone app and VST3 binary after build, including `sa3.dll`, `ggml*.dll`, and the CUDA runtime DLLs found under `SA3_CUDA_RUNTIME_DIR`.
 
 If the demo feels CPU-bound, confirm that `SA3_BUILD_DIR` points at the CUDA-enabled `sa3.cpp` build and that `ggml-cuda.dll`, `cudart64_*.dll`, `cublas64_*.dll`, and `cublasLt64_*.dll` are present beside the built app/VST3 binary.
 
@@ -81,13 +124,13 @@ On Windows, `SA3IPlug2Demo.vst3` is a bundle directory. It is normal for it to a
 
 The VST3/app binaries load `sa3.dll` at render time from beside the binary instead of importing it at module load. This keeps strict host scanners from rejecting the plug-in before the bundled `sa3.dll`, `ggml*.dll`, and CUDA runtime DLLs can be found.
 
-For Ableton testing without admin rights, either scan `C:\dev\sa3-iplug2-demo\build\out` as a VST3 custom folder or copy the bundle to `%LOCALAPPDATA%\Programs\Common\VST3`. Do not point Ableton's VST2 custom folder at the repo/build root, because it will try to scan every helper DLL as a VST2 plug-in.
+For Ableton testing without admin rights, either scan the repo's `build\out` as a VST3 custom folder or copy the bundle to `%LOCALAPPDATA%\Programs\Common\VST3`. Do not point Ableton's VST2 custom folder at the repo/build root, because it will try to scan every helper DLL as a VST2 plug-in.
 
-To refresh the per-user VST3 bundle after a Release build:
+To refresh the per-user VST3 bundle after a Release build (run from the repo root):
 
 ```powershell
 $userVst3 = Join-Path $env:LOCALAPPDATA 'Programs\Common\VST3'
-Copy-Item -LiteralPath C:\dev\sa3-iplug2-demo\build\out\SA3IPlug2Demo.vst3 -Destination $userVst3 -Recurse -Force
+Copy-Item -LiteralPath .\build\out\SA3IPlug2Demo.vst3 -Destination $userVst3 -Recurse -Force
 ```
 
 The current validated metadata is:

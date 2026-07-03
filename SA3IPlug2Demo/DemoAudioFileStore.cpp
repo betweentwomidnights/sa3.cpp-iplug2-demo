@@ -39,8 +39,9 @@ constexpr const char* kOutputUndoFileName = "myOutput.undo.wav";
 constexpr const char* kDraggedAudioFolderName = "dragged_audio";
 constexpr const char* kLoraFolderName = "loras";
 
+// The build system (CMakeLists) always sets this from SA3_CPP_DIR; this is only a no-CMake fallback.
 #ifndef SA3_DEMO_SA3_CPP_DIR
-#define SA3_DEMO_SA3_CPP_DIR "C:/dev/sa3.cpp"
+#define SA3_DEMO_SA3_CPP_DIR "sa3.cpp"
 #endif
 
 std::string ExtensionLower(const std::string& path);

@@ -4,8 +4,10 @@ project(SA3IPlug2DemoRepo VERSION 0.1.3 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(IPLUG2_DIR "C:/dev/gary-in-the-plug/vendor/iPlug2" CACHE PATH "iPlug2 root directory")
-set(SA3_CPP_DIR "C:/dev/sa3.cpp" CACHE PATH "sa3.cpp repository root")
+set(IPLUG2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/iPlug2" CACHE PATH "iPlug2 root directory")
+# defaults to a sibling checkout (clone sa3.cpp next to this repo); override with -DSA3_CPP_DIR=...
+get_filename_component(_SA3_SIBLING "${CMAKE_CURRENT_SOURCE_DIR}/../sa3.cpp" ABSOLUTE)
+set(SA3_CPP_DIR "${_SA3_SIBLING}" CACHE PATH "sa3.cpp repository root")
 set(_SA3_DEFAULT_BUILD_DIR "${SA3_CPP_DIR}/build")
 if(EXISTS "${SA3_CPP_DIR}/build-cuda/Release/sa3.lib" AND EXISTS "${SA3_CPP_DIR}/build-cuda/bin/Release/ggml-cuda.dll")
   set(_SA3_DEFAULT_BUILD_DIR "${SA3_CPP_DIR}/build-cuda")

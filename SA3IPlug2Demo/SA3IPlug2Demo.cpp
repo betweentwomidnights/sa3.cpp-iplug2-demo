@@ -24,8 +24,9 @@
 #include <limits>
 #include <random>
 
+// The build system (CMakeLists) always sets this from SA3_CPP_DIR; overridable at runtime with SA3_MODELS_DIR.
 #ifndef SA3_DEMO_DEFAULT_MODELS_DIR
-#define SA3_DEMO_DEFAULT_MODELS_DIR "C:/dev/sa3.cpp/models"
+#define SA3_DEMO_DEFAULT_MODELS_DIR "models"
 #endif
 
 namespace
@@ -260,9 +261,17 @@ class SA3DemoControl final : public IControl
     TabContinue,
     DurationSlider,
     StepsSlider,
+    CfgSlider,
     NoiseSlider,
     SeedToggle,
     SeedField,
+    BpmToggle,
+    BpmValue,
+    KeyRoot,
+    KeyMode,
+    DistShift,
+    LoopToggle,
+    LoopBars,
     Run,
     AddLora,
     LoraToggle,
@@ -270,7 +279,7 @@ class SA3DemoControl final : public IControl
     LoraSlider,
     OutputPlay,
     OutputStop,
-    OutputSave
+    SaveBuffer
   };
 
   enum class Slider
@@ -278,8 +287,10 @@ class SA3DemoControl final : public IControl
     None,
     Duration,
     Steps,
+    Cfg,
     Noise,
-    Lora
+    Lora,
+    Bpm
   };
 
   enum class EditTarget
@@ -349,10 +360,12 @@ public:
     y = DrawLoraPanel(g, IRECT(left, y, right, y + loraPanelHeight)) + 8.f;
 
     mRunRect = IRECT(left, y, left + 180.f, y + 32.f);
-    DrawButton(g, mRunRect, mPlugin.Busy() ? "cancel" : ActionLabel(mode), kDemoFont);
+    const bool canRender = mPlugin.Busy() || mPlugin.CanRender(mode);   // transform/continue need a frozen snapshot
+    DrawButton(g, mRunRect, mPlugin.Busy() ? "cancel" : ActionLabel(mode), kDemoFont, false, canRender);
+    const char* runHint = !canRender ? "drop audio or save a recorded buffer first"
+                        : mPlugin.TransportRunning() ? "host rolling: recording input" : "host stopped";
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               mPlugin.TransportRunning() ? "host rolling: recording input" : "host stopped",
-               IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
+               runHint, IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
     y += 42.f;
 
     const float outputHeight = std::min(190.f, std::max(150.f, shell.B - y - 14.f));
@@ -394,6 +407,7 @@ public:
       case Hit::TabContinue:  mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Continue); SetDirty(false); return;
       case Hit::DurationSlider: mActiveSlider = Slider::Duration; UpdateSliderFromX(x); return;
       case Hit::StepsSlider:    mActiveSlider = Slider::Steps;    UpdateSliderFromX(x); return;
+      case Hit::CfgSlider:      mActiveSlider = Slider::Cfg;      UpdateSliderFromX(x); return;
       case Hit::NoiseSlider:    mActiveSlider = Slider::Noise;    UpdateSliderFromX(x); return;
       case Hit::SeedToggle:     mPlugin.ToggleUseSeed(); SetDirty(false); return;
       case Hit::SeedField:
@@ -409,18 +423,34 @@ public:
           GetUI()->CreateTextEntry(*this, seedEntryText, mSeedFieldRect, seedText.c_str(), 0);
         }
         return;
+      case Hit::BpmToggle:      mPlugin.ToggleAppendBpm(); SetDirty(false); return;
+      case Hit::BpmValue:       mActiveSlider = Slider::Bpm; return;   // vertical drag adjusts (see OnMouseDrag)
+      case Hit::KeyRoot:        OpenKeyRootMenu(); return;
+      case Hit::KeyMode:        OpenKeyModeMenu(); return;
+      case Hit::DistShift:      OpenDistShiftMenu(); return;
+      case Hit::LoopToggle:                              // reveal/hide the 4/8/16 buttons
+        mPlugin.SetLoopBars(mPlugin.LoopBars() > 0 ? 0 : 8);
+        SetDirty(false);
+        return;
+      case Hit::LoopBars:
+      {
+        const int values[3] = {4, 8, 16};
+        mPlugin.SetLoopBars(hit.index < 3 ? values[hit.index] : 8);
+        SetDirty(false);
+        return;
+      }
       case Hit::LoraSlider:     mActiveSlider = Slider::Lora; mActiveLoraIndex = hit.index; UpdateSliderFromX(x); return;
       case Hit::LoraToggle:     ToggleLora(hit.index); SetDirty(false); return;
       case Hit::LoraRemove:     mPlugin.RemoveLora(hit.index); SetDirty(false); return;
       case Hit::AddLora:        mPlugin.ImportLoraFromDialog(); SetDirty(false); return;
       case Hit::Run:
         if (mPlugin.Busy()) mPlugin.CancelRender();
-        else mPlugin.StartRender(mPlugin.CurrentRenderMode());
+        else if (mPlugin.CanRender(mPlugin.CurrentRenderMode())) mPlugin.StartRender(mPlugin.CurrentRenderMode());
         SetDirty(false);
         return;
       case Hit::OutputPlay:     mPlugin.ToggleOutputPlayback(); SetDirty(false); return;
       case Hit::OutputStop:     mPlugin.StopOutputPlayback(); SetDirty(false); return;
-      case Hit::OutputSave:     mPlugin.SaveOutputToDisk(); SetDirty(false); return;
+      case Hit::SaveBuffer:     mPlugin.SaveSourceToDisk(); SetDirty(false); return;
       case Hit::None: break;
     }
 
@@ -436,6 +466,12 @@ public:
 
   void OnMouseDrag(float x, float y, float dX, float dY, const IMouseMod& mod) override
   {
+    if (mActiveSlider == Slider::Bpm)
+    {
+      mPlugin.AdjustBpm((double)(-dY) * 0.4);   // drag up = faster; ~2.5px per bpm, deliberate not twitchy
+      SetDirty(false);
+      return;
+    }
     if (mActiveSlider != Slider::None)
     {
       UpdateSliderFromX(x);
@@ -496,6 +532,25 @@ public:
       OnDrop(paths[0]);
   }
 
+  void OnPopupMenuSelection(IPopupMenu* pMenu, int) override
+  {
+    if (pMenu)
+    {
+      const int idx = pMenu->GetChosenItemIdx();
+      if (idx >= 0)
+      {
+        if (mActivePopup == Popup::KeyRoot)         // 0=none, 1..12=C..B (matches KeyRoot)
+          mPlugin.SetKeyRoot(idx);
+        else if (mActivePopup == Popup::KeyMode)    // 0=major, 1=minor
+          mPlugin.SetKeyMode(idx);
+        else if (mActivePopup == Popup::DistShift)  // 0=LogSNR,1=Flux,2=Full,3=None
+          mPlugin.SetDistShift(idx);
+      }
+    }
+    mActivePopup = Popup::None;
+    SetDirty(false);
+  }
+
   void OnTextEntryCompletion(const char* str, int valIdx) override
   {
     switch (mEditTarget)
@@ -538,9 +593,18 @@ private:
     if (mContinueTabRect.Contains(x, y)) return {Hit::TabContinue, 0};
     if (mDurationSliderRect.Contains(x, y)) return {Hit::DurationSlider, 0};
     if (mStepsSliderRect.Contains(x, y)) return {Hit::StepsSlider, 0};
+    if (mCfgSliderRect.Contains(x, y)) return {Hit::CfgSlider, 0};
     if (mNoiseSliderRect.Contains(x, y)) return {Hit::NoiseSlider, 0};
     if (mSeedToggleRect.Contains(x, y)) return {Hit::SeedToggle, 0};
     if (mSeedFieldRect.Contains(x, y)) return {Hit::SeedField, 0};
+    if (mBpmToggleRect.Contains(x, y)) return {Hit::BpmToggle, 0};
+    if (mBpmValueRect.Contains(x, y)) return {Hit::BpmValue, 0};
+    if (mKeyRootRect.Contains(x, y)) return {Hit::KeyRoot, 0};
+    if (mKeyModeRect.Contains(x, y)) return {Hit::KeyMode, 0};
+    if (mDistShiftRect.Contains(x, y)) return {Hit::DistShift, 0};
+    if (mLoopToggleRect.Contains(x, y)) return {Hit::LoopToggle, 0};
+    for (size_t i = 0; i < mBarsRects.size(); ++i)
+      if (mBarsRects[i].Contains(x, y)) return {Hit::LoopBars, i};
     for (size_t i = 0; i < mLoraSliderRects.size(); ++i)
       if (mLoraSliderRects[i].Contains(x, y)) return {Hit::LoraSlider, i};
     for (size_t i = 0; i < mLoraToggleRects.size(); ++i)
@@ -549,9 +613,9 @@ private:
       if (mLoraRemoveRects[i].Contains(x, y)) return {Hit::LoraRemove, i};
     if (mAddLoraRect.Contains(x, y)) return {Hit::AddLora, 0};
     if (mRunRect.Contains(x, y)) return {Hit::Run, 0};
+    if (mSaveBufferRect.Contains(x, y)) return {Hit::SaveBuffer, 0};
     if (mOutputPlayRect.Contains(x, y)) return {Hit::OutputPlay, 0};
     if (mOutputStopRect.Contains(x, y)) return {Hit::OutputStop, 0};
-    if (mOutputSaveRect.Contains(x, y)) return {Hit::OutputSave, 0};
     return {};
   }
 
@@ -586,8 +650,12 @@ private:
     mPromptRect = IRECT(bounds.L, bounds.T + 18.f, mDiceRect.L - 8.f, bounds.B);
     g.FillRoundRect(ButtonFill(), mPromptRect, 3.f);
     g.DrawRoundRect(Frame(), mPromptRect, 3.f);
-    g.DrawText(IText(13.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(mPlugin.PromptForMode(mode), FitChars(mPromptRect.W() - 16.f, 7.f, 14, 118)).c_str(), mPromptRect.GetPadded(-8.f));
+    // empty prompt is fine (the model generates unprompted, great with LoRAs) -> greyed placeholder invites it
+    const std::string prompt = mPlugin.PromptForMode(mode);
+    const bool empty = prompt.empty();
+    const std::string shown = empty ? std::string("type a prompt ...or don't. that's cool too") : prompt;
+    g.DrawText(IText(13.f, empty ? TextDim() : COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
+               CompactText(shown, FitChars(mPromptRect.W() - 16.f, 6.0f, 14, 160)).c_str(), mPromptRect.GetPadded(-8.f));
   }
 
   float SliderFraction(float value, float minValue, float maxValue) const
@@ -596,28 +664,37 @@ private:
   }
 
   void DrawSlider(IGraphics& g, const IRECT& bounds, const char* label, const char* valueText,
-                  float value, float minValue, float maxValue, IRECT& sliderRect)
+                  float value, float minValue, float maxValue, IRECT& sliderRect, bool enabled = true)
   {
     using namespace gary::ui;
-    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+    g.DrawText(IText(11.f, enabled ? TextDim() : FrameSoft(), kDemoFont, EAlign::Near, EVAlign::Middle),
                label, IRECT(bounds.L, bounds.T, bounds.L + 86.f, bounds.B));
-    g.DrawText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Far, EVAlign::Middle),
+    g.DrawText(IText(11.f, enabled ? COLOR_WHITE : TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
                valueText, IRECT(bounds.R - 58.f, bounds.T, bounds.R, bounds.B));
 
-    sliderRect = IRECT(bounds.L + 92.f, bounds.MH() - 8.f, bounds.R - 66.f, bounds.MH() + 8.f);
-    const IRECT track(sliderRect.L, sliderRect.MH() - 2.f, sliderRect.R, sliderRect.MH() + 2.f);
+    const IRECT sr(bounds.L + 92.f, bounds.MH() - 8.f, bounds.R - 66.f, bounds.MH() + 8.f);
+    const IRECT track(sr.L, sr.MH() - 2.f, sr.R, sr.MH() + 2.f);
     g.FillRoundRect(FrameSoft(), track, 2.f);
-    const float filled = sliderRect.L + sliderRect.W() * SliderFraction(value, minValue, maxValue);
-    g.FillRoundRect(Red(), IRECT(track.L, track.T, filled, track.B), 2.f);
-    g.FillCircle(COLOR_WHITE, filled, sliderRect.MH(), 6.f);
+    const float filled = sr.L + sr.W() * SliderFraction(value, minValue, maxValue);
+    g.FillRoundRect(enabled ? Red() : FrameSoft(), IRECT(track.L, track.T, filled, track.B), 2.f);
+    g.FillCircle(enabled ? COLOR_WHITE : TextDim(), filled, sr.MH(), enabled ? 6.f : 4.f);
+    sliderRect = enabled ? sr : IRECT();   // disabled slider is not registered for hit-testing
   }
 
   float DrawModeControls(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)
   {
     mDurationSliderRect = {};
+    mCfgSliderRect = {};
     mNoiseSliderRect = {};
     mSeedToggleRect = {};
     mSeedFieldRect = {};
+    mBpmToggleRect = {};
+    mBpmValueRect = {};
+    mKeyRootRect = {};
+    mKeyModeRect = {};
+    mDistShiftRect = {};
+    mLoopToggleRect = {};
+    mBarsRects = {};
     float y = bounds.T;
 
     char value[32] = {};
@@ -630,19 +707,40 @@ private:
     }
     else
     {
+      const bool loopLocks = (mode == SA3IPlug2Demo::RenderMode::Text && mPlugin.LoopBars() > 0);
       std::snprintf(value, sizeof value, "%ds", mPlugin.DurationSeconds());
       DrawSlider(g, IRECT(bounds.L, y, bounds.R, y + 26.f),
                  mode == SA3IPlug2Demo::RenderMode::Continue ? "total" : "duration",
-                 value, (float)mPlugin.DurationSeconds(), 1.f, 300.f, mDurationSliderRect);
+                 loopLocks ? "loop" : value, (float)mPlugin.DurationSeconds(), 1.f, 300.f, mDurationSliderRect, !loopLocks);
       y += 32.f;
     }
 
     std::snprintf(value, sizeof value, "%d", mPlugin.Steps());
     DrawSlider(g, IRECT(bounds.L, y, bounds.R, y + 26.f), "steps", value,
-               (float)mPlugin.Steps(), 1.f, 64.f, mStepsSliderRect);
+               (float)mPlugin.Steps(), 1.f, 16.f, mStepsSliderRect);
+    y += 32.f;
+
+    std::snprintf(value, sizeof value, "%.1f", mPlugin.CfgScale());
+    DrawSlider(g, IRECT(bounds.L, y, bounds.R, y + 26.f), "cfg", value,
+               mPlugin.CfgScale(), 0.5f, 2.0f, mCfgSliderRect);   // 1.0 = off (single pass)
+    y += 32.f;
+
+    {   // distribution shift (sampler schedule warp; default LogSNR) — a libsa3 primitive dropdown
+      const IRECT row(bounds.L, y, bounds.R, y + 26.f);
+      g.DrawText(IText(11.f, gary::ui::TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+                 "shift", IRECT(row.L, row.T, row.L + 86.f, row.B));
+      mDistShiftRect = IRECT(row.L + 92.f, row.T + 1.f, row.L + 200.f, row.B - 1.f);
+      DrawDropButton(g, mDistShiftRect, mPlugin.DistShiftName());
+    }
     y += 32.f;
 
     DrawSeedControls(g, IRECT(bounds.L, y, bounds.R, y + 26.f));
+    y += 32.f;
+
+    DrawMusicalControls(g, IRECT(bounds.L, y, bounds.R, y + 26.f));
+    y += 32.f;
+
+    DrawLoopControls(g, IRECT(bounds.L, y, bounds.R, y + 26.f), mode);
     return y + 26.f;
   }
 
@@ -659,20 +757,112 @@ private:
     g.DrawText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
                "use", IRECT(mSeedToggleRect.R + 6.f, bounds.T, mSeedToggleRect.R + 40.f, bounds.B));
 
-    mSeedFieldRect = IRECT(bounds.L + 142.f, bounds.T + 1.f, bounds.R - 92.f, bounds.B - 1.f);
+    // The field shows: the seed in use (white) when locked; otherwise the last generated seed greyed out
+    // (hit "use" to reuse+lock it), or "random" before the first generation. One display, no duplication.
+    mSeedFieldRect = IRECT(bounds.L + 142.f, bounds.T + 1.f, bounds.R, bounds.B - 1.f);
     g.FillRoundRect(ButtonFill(), mSeedFieldRect, 3.f);
     g.DrawRoundRect(Frame(), mSeedFieldRect, 3.f);
-    const int64_t visibleSeed = mPlugin.UseSeed() ? mPlugin.SeedValue()
-                              : mPlugin.HasLastSeed() ? mPlugin.LastSeed()
-                                                      : 0;
-    const std::string seedText = (mPlugin.UseSeed() || mPlugin.HasLastSeed()) ? std::to_string(visibleSeed) : std::string("random");
-    g.DrawText(IText(11.f, mPlugin.UseSeed() ? COLOR_WHITE : TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(seedText, FitChars(mSeedFieldRect.W() - 12.f, 6.f, 4, 24)).c_str(),
+    const bool useSeed = mPlugin.UseSeed();
+    const std::string seedText = useSeed ? std::to_string(mPlugin.SeedValue())
+                               : mPlugin.HasLastSeed() ? std::to_string(mPlugin.LastSeed())
+                                                       : std::string("random");
+    g.DrawText(IText(11.f, useSeed ? COLOR_WHITE : TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               CompactText(seedText, FitChars(mSeedFieldRect.W() - 12.f, 6.f, 4, 40)).c_str(),
                mSeedFieldRect.GetPadded(-6.f));
+  }
 
-    const std::string lastText = mPlugin.HasLastSeed() ? "last " + CompactText(std::to_string(mPlugin.LastSeed()), 8) : "last -";
+  void DrawDropButton(IGraphics& g, const IRECT& bounds, const char* text)
+  {
+    using namespace gary::ui;
+    g.FillRoundRect(ButtonFill(), bounds, 3.f);
+    g.DrawRoundRect(Frame(), bounds, 3.f);
+    g.DrawText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
+               text, IRECT(bounds.L + 8.f, bounds.T, bounds.R - 14.f, bounds.B));
+    const float cx = bounds.R - 10.f, cy = bounds.MH();
+    g.FillTriangle(TextDim(), cx - 4.f, cy - 2.f, cx + 4.f, cy - 2.f, cx, cy + 3.f);
+  }
+
+  void DrawMusicalControls(IGraphics& g, const IRECT& bounds)
+  {
+    using namespace gary::ui;
+    // bpm-append toggle + live host tempo
+    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               "bpm", IRECT(bounds.L, bounds.T, bounds.L + 30.f, bounds.B));
+    mBpmToggleRect = IRECT(bounds.L + 34.f, bounds.MH() - 8.f, bounds.L + 50.f, bounds.MH() + 8.f);
+    const bool bpmOn = mPlugin.AppendBpm();
+    g.DrawRoundRect(bpmOn ? Red() : Frame(), mBpmToggleRect, 2.f);
+    if (bpmOn)
+      g.FillRoundRect(Red(), mBpmToggleRect.GetPadded(-4.f), 1.f);
+    // draggable bpm value (vertical drag adjusts; follows host tempo until dragged)
+    mBpmValueRect = IRECT(mBpmToggleRect.R + 6.f, bounds.T + 2.f, bounds.L + 116.f, bounds.B - 2.f);
+    g.FillRoundRect(ButtonFill(), mBpmValueRect, 3.f);
+    g.DrawRoundRect(mPlugin.BpmOverridden() ? Frame() : FrameSoft(), mBpmValueRect, 3.f);
+    char bpmText[24] = {};
+    std::snprintf(bpmText, sizeof bpmText, "%d", (int)std::llround(mPlugin.Bpm()));
+    g.DrawText(IText(12.f, bpmOn ? COLOR_WHITE : TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle),
+               bpmText, mBpmValueRect);
+
+    // key root (dropdown) + major/minor (click toggle)
+    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
+               "key", IRECT(bounds.L + 118.f, bounds.T, bounds.R - 150.f, bounds.B));
+    mKeyRootRect = IRECT(bounds.R - 144.f, bounds.T + 1.f, bounds.R - 78.f, bounds.B - 1.f);
+    mKeyModeRect = IRECT(bounds.R - 74.f, bounds.T + 1.f, bounds.R, bounds.B - 1.f);
+    static const char* kRoots[13] = {"none", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    const int root = std::clamp(mPlugin.KeyRoot(), 0, 12);
+    DrawDropButton(g, mKeyRootRect, kRoots[root]);
+    DrawDropButton(g, mKeyModeRect, mPlugin.KeyMode() ? "minor" : "major");   // key applies only when root != none
+  }
+
+  void DrawLoopControls(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)
+  {
+    using namespace gary::ui;
+    mLoopToggleRect = {};
+    mBarsRects = {};
+    if (mode != SA3IPlug2Demo::RenderMode::Text)
+    {
+      g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+                 "loops available in generate mode", IRECT(bounds.L, bounds.T, bounds.R, bounds.B));
+      return;
+    }
+    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               "loop", IRECT(bounds.L, bounds.T, bounds.L + 40.f, bounds.B));
+    const int bars = mPlugin.LoopBars();
+    const bool on = bars > 0;
+
+    mLoopToggleRect = IRECT(bounds.L + 44.f, bounds.T + 1.f, bounds.L + 84.f, bounds.B - 1.f);
+    g.FillRoundRect(on ? Red() : ButtonFill(), mLoopToggleRect, 3.f);
+    g.DrawRoundRect(on ? Red() : Frame(), mLoopToggleRect, 3.f);
+    g.DrawText(IText(11.f, on ? COLOR_BLACK : COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle),
+               on ? "on" : "off", mLoopToggleRect);
+
+    if (!on)
+    {
+      g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+                 "generate an exact bar length", IRECT(mLoopToggleRect.R + 10.f, bounds.T, bounds.R, bounds.B));
+      return;
+    }
+
+    const int values[3] = {4, 8, 16};
+    const char* labels[3] = {"4", "8", "16"};
+    float bx = mLoopToggleRect.R + 8.f;
+    for (int i = 0; i < 3; ++i)
+    {
+      IRECT r(bx, bounds.T + 1.f, bx + 36.f, bounds.B - 1.f);
+      mBarsRects[(size_t)i] = r;
+      const bool active = bars == values[i];
+      g.FillRoundRect(active ? Red() : ButtonFill(), r, 3.f);
+      g.DrawRoundRect(active ? Red() : Frame(), r, 3.f);
+      g.DrawText(IText(11.f, active ? COLOR_BLACK : COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle), labels[i], r);
+      bx += 42.f;
+    }
+    const double bpm = mPlugin.Bpm();
+    char hint[48] = {};
+    if (bpm > 0.0)
+      std::snprintf(hint, sizeof hint, "%.1fs", (60.0 / bpm) * 4.0 * bars);
+    else
+      std::snprintf(hint, sizeof hint, "need bpm");
     g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               lastText.c_str(), IRECT(bounds.R - 86.f, bounds.T, bounds.R, bounds.B));
+               hint, IRECT(bx + 4.f, bounds.T, bounds.R, bounds.B));
   }
 
   float DrawLoraPanel(IGraphics& g, const IRECT& bounds)
@@ -758,7 +948,10 @@ private:
         mPlugin.SetDurationSeconds((int)std::llround(1.f + fraction(mDurationSliderRect, x) * 299.f));
         break;
       case Slider::Steps:
-        mPlugin.SetSteps((int)std::llround(1.f + fraction(mStepsSliderRect, x) * 63.f));
+        mPlugin.SetSteps((int)std::llround(1.f + fraction(mStepsSliderRect, x) * 15.f));
+        break;
+      case Slider::Cfg:
+        mPlugin.SetCfgScale(0.5f + fraction(mCfgSliderRect, x) * 1.5f);
         break;
       case Slider::Noise:
         mPlugin.SetInitNoiseLevel(0.01f + fraction(mNoiseSliderRect, x) * 0.99f);
@@ -767,6 +960,7 @@ private:
         if (mActiveLoraIndex < mLoraSliderRects.size())
           mPlugin.SetLoraStrength(mActiveLoraIndex, fraction(mLoraSliderRects[mActiveLoraIndex], x) * 2.f);
         break;
+      case Slider::Bpm:   // handled by vertical drag in OnMouseDrag
       case Slider::None:
         break;
     }
@@ -780,7 +974,46 @@ private:
       mPlugin.SetLoraEnabled(index, !loras[index].enabled);
   }
 
-  void DrawWaveform(IGraphics& g, const IRECT& bounds, const SA3IPlug2Demo::Waveform& wf, const IColor& color)
+  void OpenKeyRootMenu()
+  {
+    if (!GetUI())
+      return;
+    static const char* kRoots[13] = {"none", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    mKeyMenu.Clear();
+    for (int i = 0; i < 13; ++i)
+      mKeyMenu.AddItem(kRoots[i]);
+    mKeyMenu.CheckItem(std::clamp(mPlugin.KeyRoot(), 0, 12), true);
+    mActivePopup = Popup::KeyRoot;
+    GetUI()->CreatePopupMenu(*this, mKeyMenu, mKeyRootRect);
+  }
+
+  void OpenKeyModeMenu()
+  {
+    if (!GetUI())
+      return;
+    mKeyMenu.Clear();
+    mKeyMenu.AddItem("major");
+    mKeyMenu.AddItem("minor");
+    mKeyMenu.CheckItem(mPlugin.KeyMode() ? 1 : 0, true);
+    mActivePopup = Popup::KeyMode;
+    GetUI()->CreatePopupMenu(*this, mKeyMenu, mKeyModeRect);
+  }
+
+  void OpenDistShiftMenu()
+  {
+    if (!GetUI())
+      return;
+    static const char* kNames[4] = {"LogSNR", "Flux", "Full", "None"};
+    mKeyMenu.Clear();
+    for (int i = 0; i < 4; ++i)
+      mKeyMenu.AddItem(kNames[i]);
+    mKeyMenu.CheckItem(std::clamp(mPlugin.DistShift(), 0, 3), true);
+    mActivePopup = Popup::DistShift;
+    GetUI()->CreatePopupMenu(*this, mKeyMenu, mDistShiftRect);
+  }
+
+  void DrawWaveform(IGraphics& g, const IRECT& bounds, const SA3IPlug2Demo::Waveform& wf,
+                    const IColor& brightColor, const IColor& dimColor)
   {
     g.FillRoundRect(gary::ui::PanelDark(), bounds, 4.f);
     g.DrawRoundRect(gary::ui::FrameSoft(), bounds, 4.f);
@@ -790,11 +1023,14 @@ private:
     const float mid = bounds.MH();
     const float half = bounds.H() * 0.43f;
     const int n = static_cast<int>(wf.peaks.size());
+    // buckets up to the frozen "save buffer" point draw bright, the grown-past-save remainder draws dim
+    const int savedBuckets = (int)std::ceil((double)wf.savedSamples / std::max(1, wf.numSamples) * n);
     for (int i = 0; i < n; ++i)
     {
       const float x = bounds.L + (i + 0.5f) * bounds.W() / std::max(1, n);
       const auto& p = wf.peaks[(size_t)i];
-      g.DrawLine(color, x, mid - p.maxValue * half, x, mid - p.minValue * half, nullptr, 1.f);
+      const IColor& c = (i < savedBuckets) ? brightColor : dimColor;
+      g.DrawLine(c, x, mid - p.maxValue * half, x, mid - p.minValue * half, nullptr, 1.f);
     }
 
     if (wf.playheadSamples > 0)
@@ -812,10 +1048,19 @@ private:
     g.DrawRoundRect(Frame(), bounds, 5.f);
     g.DrawText(IText(14.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
                title, IRECT(bounds.L + 12.f, bounds.T + 8.f, bounds.MW(), bounds.T + 28.f));
+    // "save buffer" lives with the source panel (saves the recording buffer to myBuffer.wav); the output
+    // panel has no manual save button — output auto-saves to myOutput.wav and drags out with its own name.
+    float detailR = bounds.R - 12.f;
+    if (!output)
+    {
+      mSaveBufferRect = IRECT(bounds.R - 96.f, bounds.T + 6.f, bounds.R - 10.f, bounds.T + 26.f);
+      DrawButton(g, mSaveBufferRect, "save buffer", kDemoFont);
+      detailR = mSaveBufferRect.L - 8.f;
+    }
     const double seconds = wf.numSamples > 0 ? (double)wf.numSamples / std::max(1, wf.sampleRate) : 0.0;
     char detail[160] = {};
     std::snprintf(detail, sizeof(detail), "%.2fs @ %d Hz", seconds, std::max(1, wf.sampleRate));
-    const IRECT detailRect(bounds.MW(), bounds.T + 8.f, bounds.R - 12.f, bounds.T + 28.f);
+    const IRECT detailRect(bounds.MW(), bounds.T + 8.f, detailR, bounds.T + 28.f);
     const std::string detailText = wf.numSamples > 0
                                  ? std::string(detail)
                                  : CompactText(status, FitChars(detailRect.W(), 6.f, 10, 64));
@@ -824,7 +1069,8 @@ private:
 
     const IRECT wfRect(bounds.L + 12.f, bounds.T + 34.f, bounds.R - 12.f, bounds.B - (output ? 48.f : 36.f));
     if (output) mOutputWaveformRect = wfRect;
-    DrawWaveform(g, wfRect, wf, Red());
+    // source: bright up to the saved point, dim past it; output: uniform bright
+    DrawWaveform(g, wfRect, wf, Red(), output ? Red() : RedDim());
     if (!output)
       g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle),
                  CompactText(status, FitChars(bounds.W() - 24.f, 6.f, 16, 72)).c_str(),
@@ -838,27 +1084,33 @@ private:
     const float y = bounds.B - 40.f;
     mOutputPlayRect = IRECT(bounds.L + 12.f, y, bounds.L + 48.f, y + 30.f);
     mOutputStopRect = IRECT(mOutputPlayRect.R + 8.f, y, mOutputPlayRect.R + 44.f, y + 30.f);
-    mOutputSaveRect = IRECT(mOutputStopRect.R + 8.f, y, mOutputStopRect.R + 116.f, y + 30.f);
     DrawIconButton(g, mOutputPlayRect, mPlugin.OutputPlaying() ? TransportIcon::Pause : TransportIcon::Play);
     DrawIconButton(g, mOutputStopRect, TransportIcon::Stop);
-    DrawButton(g, mOutputSaveRect, "save wav", kDemoFont);
+    // no manual output-save button: output auto-saves to myOutput.wav after each render + drags out separately
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               CompactText(mPlugin.OutputStatusText(), FitChars(bounds.R - mOutputSaveRect.R - 20.f, 6.f, 8, 64)).c_str(),
-               IRECT(mOutputSaveRect.R + 8.f, y, bounds.R - 12.f, y + 30.f));
+               CompactText(mPlugin.OutputStatusText(), FitChars(bounds.R - mOutputStopRect.R - 24.f, 6.f, 8, 72)).c_str(),
+               IRECT(mOutputStopRect.R + 12.f, y, bounds.R - 12.f, y + 30.f));
   }
 
   SA3IPlug2Demo& mPlugin;
   IRECT mPromptRect;
   IRECT mDiceRect;
   IRECT mGenerateTabRect, mTransformTabRect, mContinueTabRect;
-  IRECT mDurationSliderRect, mStepsSliderRect, mNoiseSliderRect;
+  IRECT mDurationSliderRect, mStepsSliderRect, mCfgSliderRect, mNoiseSliderRect;
   IRECT mSeedToggleRect, mSeedFieldRect;
+  IRECT mBpmToggleRect, mBpmValueRect, mKeyRootRect, mKeyModeRect;
+  IRECT mDistShiftRect;
+  IRECT mLoopToggleRect;
+  std::array<IRECT, 4> mBarsRects{};   // 4, 8, 16 (index 3 unused)
   IRECT mRunRect, mAddLoraRect;
   std::vector<IRECT> mLoraToggleRects;
   std::vector<IRECT> mLoraRemoveRects;
   std::vector<IRECT> mLoraSliderRects;
-  IRECT mOutputWaveformRect, mOutputPlayRect, mOutputStopRect, mOutputSaveRect;
+  IRECT mSaveBufferRect;
+  IRECT mOutputWaveformRect, mOutputPlayRect, mOutputStopRect;
   Slider mActiveSlider = Slider::None;
+  enum class Popup { None, KeyRoot, KeyMode, DistShift } mActivePopup = Popup::None;
+  IPopupMenu mKeyMenu;
   EditTarget mEditTarget = EditTarget::None;
   SA3IPlug2Demo::RenderMode mEditPromptMode = SA3IPlug2Demo::RenderMode::Text;
   size_t mActiveLoraIndex = 0;
@@ -873,8 +1125,12 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
 : iplug::Plugin(info, MakeConfig(kNumParams, kNumPresets))
 {
   GetParam(kStatusParam)->InitDouble("Status", 0., 0., 1., 1., "");
+  mDurationSeconds[0].store(30, std::memory_order_release);    // generate
+  mDurationSeconds[1].store(12, std::memory_order_release);    // transform (duration unused; noise slider instead)
+  mDurationSeconds[2].store(120, std::memory_order_release);   // continue (total length incl. source)
   ResizeRecordBuffer(44100.0);
   mHostSampleRate.store(44100, std::memory_order_release);
+  LoadPersistedBuffer();   // restore myBuffer.wav (frozen init snapshot) from a previous session
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
@@ -939,6 +1195,13 @@ void SA3IPlug2Demo::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
   const int nOutChans = NOutChansConnected();
   const bool running = GetTransportIsRunning();
   mTransportRunning.store(running, std::memory_order_release);
+  const double tempo = GetTempo();
+  if (tempo > 0.0)
+  {
+    mHostTempo.store(tempo, std::memory_order_release);
+    if (!mBpmOverride.load(std::memory_order_acquire))   // DAW: follow host tempo unless user dragged it
+      mBpm.store(tempo, std::memory_order_release);
+  }
 
   if (running && !mWasTransportRunning)
     StartAutoRecording();
@@ -1038,6 +1301,21 @@ std::string SA3IPlug2Demo::PromptForMode(RenderMode mode) const
   return mPrompts[(size_t)ModeIndex(mode)];
 }
 
+std::string SA3IPlug2Demo::KeyScaleText() const
+{
+  static const char* kKeyNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+  const int root = KeyRoot();
+  if (root < 1 || root > 12)
+    return {};
+  return std::string(kKeyNames[root - 1]) + (KeyMode() ? " minor" : " major");
+}
+
+const char* SA3IPlug2Demo::DistShiftName() const
+{
+  static const char* kNames[4] = {"LogSNR", "Flux", "Full", "None"};
+  return kNames[std::clamp(DistShift(), 0, 3)];
+}
+
 std::string SA3IPlug2Demo::StatusText() const
 {
   std::lock_guard<std::mutex> lock(mStatusMutex);
@@ -1080,7 +1358,7 @@ SA3IPlug2Demo::RenderMode SA3IPlug2Demo::CurrentRenderMode() const noexcept
 
 void SA3IPlug2Demo::AdjustDuration(int deltaSeconds)
 {
-  SetDurationSeconds(mDurationSeconds.load(std::memory_order_acquire) + deltaSeconds);
+  SetDurationSeconds(DurationSeconds() + deltaSeconds);
 }
 
 void SA3IPlug2Demo::AdjustSteps(int deltaSteps)
@@ -1095,12 +1373,12 @@ void SA3IPlug2Demo::AdjustInitNoise(float delta)
 
 void SA3IPlug2Demo::SetDurationSeconds(int seconds)
 {
-  mDurationSeconds.store(std::clamp(seconds, 1, 300), std::memory_order_release);
+  mDurationSeconds[(size_t)mCurrentMode.load(std::memory_order_acquire)].store(std::clamp(seconds, 1, 300), std::memory_order_release);
 }
 
 void SA3IPlug2Demo::SetSteps(int steps)
 {
-  mSteps.store(std::clamp(steps, 1, 64), std::memory_order_release);
+  mSteps.store(std::clamp(steps, 1, 16), std::memory_order_release);   // ARC-distilled model: few steps
 }
 
 void SA3IPlug2Demo::SetInitNoiseLevel(float level)
@@ -1145,11 +1423,12 @@ void SA3IPlug2Demo::StartRender(RenderMode mode)
   if (mode != RenderMode::Text && (input.sourceSamples <= 0 || input.sourceChannels.empty()))
   {
     mBusy.store(false, std::memory_order_release);
-    SetStatus("drop or record source audio first");
+    SetStatus("drop audio or save a recorded buffer first");
     return;
   }
 
-  mOutputPlaying.store(false, std::memory_order_release);
+  // Do NOT stop output playback here: you can generate while the previous output is auditioning. When the new
+  // output arrives, InstallOutputFromPlanar swaps the buffer and resets the playhead to 0 (keeps playing).
   mProgress.store(0.f, std::memory_order_release);
   const uint64_t requestId = mRequestId.fetch_add(1, std::memory_order_acq_rel) + 1;
   SetStatus(mode == RenderMode::Text ? "queued text generation"
@@ -1191,17 +1470,26 @@ bool SA3IPlug2Demo::LoadDroppedAudioFile(const char* rawPath)
   const int hostRate = std::max(1, (int)(GetSampleRate() + 0.5));
   gary::RecordingSnapshot playable = decoded.sampleRate == hostRate ? decoded
                                                                     : gary::ResampleSnapshotLinear(decoded, hostRate);
+  const int droppedSamples = playable.numSamples;
+  const int droppedRate = playable.sampleRate;
+  // dropped audio immediately becomes the frozen init snapshot + myBuffer.wav (matches gary), shown all bright
+  gary::SaveRecordingWav(playable);
   {
     std::lock_guard<std::mutex> lock(mSourceMutex);
+    mInitBuffer = playable.channels;
+    mInitSamples = droppedSamples;
+    mInitSampleRate = droppedRate;
     mSourceBuffer = std::move(playable.channels);
-    mSourceSamples = playable.numSamples;
-    mSourceSampleRate = playable.sampleRate;
-    mRecordWritePosition = playable.numSamples;
+    mSourceSamples = droppedSamples;
+    mSourceSampleRate = droppedRate;
+    mRecordWritePosition = droppedSamples;
   }
+  mSavedSamples.store(droppedSamples, std::memory_order_release);
+  mHasInit.store(true, std::memory_order_release);
 
   char status[192] = {};
   std::snprintf(status, sizeof(status), "loaded %.2fs from %s",
-                (double)playable.numSamples / std::max(1, playable.sampleRate),
+                (double)droppedSamples / std::max(1, droppedRate),
                 CompactText(FileNameFromPath(path), 42).c_str());
   SetSourceStatus(status);
   return true;
@@ -1230,6 +1518,40 @@ bool SA3IPlug2Demo::SaveOutputToDisk()
   }
 
   SetOutputStatus("saved " + FormatBytes(info.bytes));
+  return true;
+}
+
+bool SA3IPlug2Demo::SaveSourceToDisk()
+{
+  gary::RecordingSnapshot snapshot;
+  {
+    std::lock_guard<std::mutex> lock(mSourceMutex);
+    if (mSourceSamples <= 0 || mSourceBuffer.empty())
+    {
+      SetSourceStatus("no buffer to save");
+      return false;
+    }
+    // freeze the current scratch as the init snapshot (trimmed to the recorded length) + write myBuffer.wav
+    mInitBuffer.assign(mSourceBuffer.size(), {});
+    for (size_t c = 0; c < mSourceBuffer.size(); ++c)
+      mInitBuffer[c].assign(mSourceBuffer[c].begin(), mSourceBuffer[c].begin() + std::min<size_t>(mSourceSamples, mSourceBuffer[c].size()));
+    mInitSamples = mSourceSamples;
+    mInitSampleRate = mSourceSampleRate;
+    snapshot.channels = mInitBuffer;
+    snapshot.numSamples = mInitSamples;
+    snapshot.sampleRate = mInitSampleRate;
+  }
+  mSavedSamples.store(snapshot.numSamples, std::memory_order_release);   // this length turns bright red
+  mHasInit.store(true, std::memory_order_release);
+
+  const auto info = gary::SaveRecordingWav(snapshot);
+  if (!info.ok)
+  {
+    SetSourceStatus(std::string("save failed: ") + info.error);
+    return false;
+  }
+
+  SetSourceStatus("saved buffer " + FormatBytes(info.bytes));
   return true;
 }
 
@@ -1359,6 +1681,7 @@ SA3IPlug2Demo::Waveform SA3IPlug2Demo::SourceWaveform(int bucketCount) const
   std::lock_guard<std::mutex> lock(mSourceMutex);
   wf.numSamples = mSourceSamples;
   wf.sampleRate = mSourceSampleRate;
+  wf.savedSamples = std::clamp(mSavedSamples.load(std::memory_order_acquire), 0, mSourceSamples);
   wf.active = mTransportRunning.load(std::memory_order_acquire);
   if (mSourceSamples <= 0 || mSourceBuffer.empty())
     return wf;
@@ -1479,12 +1802,33 @@ void SA3IPlug2Demo::RebuildOutputPlaybackBufferFromNativeLocked(int hostSampleRa
 
 void SA3IPlug2Demo::StartAutoRecording()
 {
-  std::lock_guard<std::mutex> lock(mSourceMutex);
-  for (auto& ch : mSourceBuffer)
-    std::fill(ch.begin(), ch.end(), 0.f);
-  mSourceSamples = 0;
-  mRecordWritePosition = 0;
+  {
+    std::lock_guard<std::mutex> lock(mSourceMutex);
+    for (auto& ch : mSourceBuffer)
+      std::fill(ch.begin(), ch.end(), 0.f);
+    mSourceSamples = 0;
+    mRecordWritePosition = 0;
+  }
+  mSavedSamples.store(0, std::memory_order_release);   // fresh scratch take: nothing saved yet (all dim red)
   SetSourceStatus("recording host input");
+}
+
+void SA3IPlug2Demo::LoadPersistedBuffer()
+{
+  const std::string path = gary::RecordingWavPath();
+  if (path.empty())
+    return;
+  gary::RecordingSnapshot snap;
+  const auto info = gary::LoadWavFile(path, snap);
+  if (!info.ok || snap.numSamples <= 0 || snap.channels.empty())
+    return;
+  {
+    std::lock_guard<std::mutex> lock(mSourceMutex);
+    mInitBuffer = std::move(snap.channels);
+    mInitSamples = snap.numSamples;
+    mInitSampleRate = snap.sampleRate;
+  }
+  mHasInit.store(true, std::memory_order_release);
 }
 
 void SA3IPlug2Demo::StopAutoRecording()
@@ -1575,17 +1919,37 @@ SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
 {
   RenderInput input;
   input.mode = mode;
-  input.prompt = PromptForMode(mode);
   input.durationSeconds = DurationSeconds();
   input.steps = Steps();
+  input.cfgScale = CfgScale();
   input.initNoiseLevel = InitNoiseLevel();
   input.useSeed = UseSeed();
   input.seed = SeedValue();
+  input.bpm = Bpm();
+  input.loopBars = (mode == RenderMode::Text) ? LoopBars() : 0;   // loops are Text-mode only
+  input.distShift = DistShift();
+
+  // Build the prompt actually sent: base + optional " <bpm> bpm" + optional " C minor".
+  // Mirrors gary4juce SA3UI (host tempo + key/scale get appended to the text prompt).
+  std::string prompt = PromptForMode(mode);
+  const std::string keyScale = KeyScaleText();
+  if ((AppendBpm() || input.loopBars > 0) && input.bpm > 0.0)
+  {
+    if (!prompt.empty()) prompt += ' ';
+    prompt += std::to_string((int)std::llround(input.bpm)) + " bpm";
+  }
+  if (!keyScale.empty())
+  {
+    if (!prompt.empty()) prompt += ' ';
+    prompt += keyScale;
+  }
+  input.prompt = std::move(prompt);
+  if (mode != RenderMode::Text)   // transform/continue use the FROZEN snapshot (myBuffer.wav), not the live scratch
   {
     std::lock_guard<std::mutex> lock(mSourceMutex);
-    input.sourceChannels = mSourceBuffer;
-    input.sourceSamples = mSourceSamples;
-    input.sourceSampleRate = mSourceSampleRate;
+    input.sourceChannels = mInitBuffer;
+    input.sourceSamples = mInitSamples;
+    input.sourceSampleRate = mInitSampleRate;
   }
   {
     std::lock_guard<std::mutex> lock(mLoraMutex);
@@ -1653,14 +2017,29 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   gary::RecordingSnapshot source = SourceSnapshotForSA3(input);
   std::vector<float> planar = ToPlanar(source);
 
+  // Loop mode (Text only): generate loop_duration + a little pad with NO schedule ending, then trim to the
+  // exact bar length in the plugin. libsa3 has no target_n_samp, so this mirrors sa3-server /generate/loop
+  // demo-side (frames carry the pad; duration_padding_sec=0). loopTargetSamples>0 requests the front trim.
+  int loopTargetSamples = 0;
+  double genSeconds = (double)input.durationSeconds;
+  if (input.mode == RenderMode::Text && input.loopBars > 0 && input.bpm > 0.0)
+  {
+    const double secondsPerBar = (60.0 / input.bpm) * 4.0;   // 4/4
+    const double loopSeconds = secondsPerBar * (double)input.loopBars;
+    genSeconds = loopSeconds + 2.0;                          // ~2s headroom, trimmed away below
+    loopTargetSamples = std::max(1, (int)std::llround(loopSeconds * 44100.0));
+  }
+
   sa3_request_ex req = {};
   req.request.prompt = input.prompt.c_str();
-  req.request.frames = std::max(1, (int)(input.durationSeconds * 44100.0 / 4096.0 + 0.5));
+  req.request.frames = std::max(1, (int)(genSeconds * 44100.0 / 4096.0 + 0.5));
   req.request.steps = input.steps;
   req.request.seed = input.useSeed ? input.seed : -1;
-  req.request.cfg_scale = 1.0f;
-  req.request.duration_padding_sec = input.mode == RenderMode::Text ? 6.0f : 0.0f;
+  req.request.cfg_scale = input.cfgScale;
+  req.request.duration_padding_sec = (input.mode == RenderMode::Text && loopTargetSamples == 0) ? 6.0f : 0.0f;
   req.request.keep_models = 0;
+  static const char* kDistShiftNames[4] = {"LogSNR", "Flux", "Full", "None"};   // static: outlives the call
+  req.request.dist_shift = kDistShiftNames[std::clamp(input.distShift, 0, 3)];   // params[4] stay 0 -> type defaults
   req.encode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
   req.encode_overlap = 32;
   req.decode_chunk_size = 128;
@@ -1750,7 +2129,9 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
 
   mLastSeed.store(RequestableSeed(audio.seed), std::memory_order_release);
   mHasLastSeed.store(true, std::memory_order_release);
-  InstallOutputFromPlanar(audio.samples, audio.n_samp, audio.n_ch, audio.sample_rate);
+  // Loop mode: trim the padded generation back to the exact bar length (native rate is 44100).
+  const int keepSamples = (loopTargetSamples > 0) ? std::min(loopTargetSamples, audio.n_samp) : -1;
+  InstallOutputFromPlanar(audio.samples, audio.n_samp, audio.n_ch, audio.sample_rate, keepSamples);
   sa3->freeAudio(&audio);
   SaveOutputToDisk();
   finish("render complete");
@@ -1784,26 +2165,30 @@ void SA3IPlug2Demo::SetOutputStatus(const std::string& text)
   mOutputStatus = text;
 }
 
-void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate)
+void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate, int keepSamples)
 {
   if (!samples || nSamp <= 0 || nCh <= 0)
     return;
 
-  std::vector<std::vector<float>> next((size_t)nCh, std::vector<float>((size_t)nSamp, 0.f));
+  // keepSamples < 0 keeps everything; otherwise take the first keepSamples per channel (loop trim), reading
+  // with the source's full nSamp stride so the planar channel offsets stay correct.
+  const int outSamps = (keepSamples > 0 && keepSamples < nSamp) ? keepSamples : nSamp;
+  std::vector<std::vector<float>> next((size_t)nCh, std::vector<float>((size_t)outSamps, 0.f));
   for (int c = 0; c < nCh; ++c)
-    std::copy(samples + (size_t)c * nSamp, samples + (size_t)(c + 1) * nSamp, next[(size_t)c].begin());
+    std::copy(samples + (size_t)c * nSamp, samples + (size_t)c * nSamp + outSamps, next[(size_t)c].begin());
 
   {
     std::lock_guard<std::mutex> lock(mOutputMutex);
     mOutputBuffer = std::move(next);
-    mOutputSamples = nSamp;
+    mOutputSamples = outSamps;
     mOutputSampleRate = std::max(1, sampleRate);
+    // resets playhead to 0 and stops playback: the swap ends the previous audition cleanly (user's preference).
     RebuildOutputPlaybackBufferFromNativeLocked(mHostSampleRate.load(std::memory_order_acquire));
   }
   mOutputRevision.fetch_add(1, std::memory_order_acq_rel);
   char status[128] = {};
   std::snprintf(status, sizeof status, "output %.2fs @ %d Hz ready",
-                (double)nSamp / std::max(1, sampleRate), std::max(1, sampleRate));
+                (double)outSamps / std::max(1, sampleRate), std::max(1, sampleRate));
   SetOutputStatus(status);
 }
 
