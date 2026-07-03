@@ -466,8 +466,60 @@ std::vector<std::string> LoadPromptPoolForLoraSource(const std::string& sourcePa
   return prompts;
 }
 
+#if defined(_WIN32)
+// Native in-process safetensors->gguf via libsa3's sa3_convert_lora (no Python). Loads sa3.dll from beside
+// this module (same resolution the render path uses). Returns: 1 converted, 0 native unavailable (fall back
+// to Python), -1 native ran but the conversion failed (error set).
+int TryNativeConvertLora(const std::string& exportedBase, const std::string& destination, std::string& error)
+{
+  HMODULE self = nullptr;
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(&TryNativeConvertLora), &self))
+    return 0;
+  wchar_t buffer[1024];
+  const DWORD len = GetModuleFileNameW(self, buffer, 1024);
+  if (len == 0 || len >= 1024)
+    return 0;
+  std::wstring path(buffer, len);
+  const size_t slash = path.find_last_of(L"\\/");
+  if (slash == std::wstring::npos)
+    return 0;
+  const std::wstring dllPath = path.substr(0, slash) + L"\\sa3.dll";
+
+  HMODULE dll = LoadLibraryExW(dllPath.c_str(), nullptr,
+                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+  if (!dll)
+    return 0;
+  using ConvFn = int (*)(const char*, const char*, const char*, char*, int);
+  auto fn = reinterpret_cast<ConvFn>(GetProcAddress(dll, "sa3_convert_lora"));
+  if (!fn) { FreeLibrary(dll); return 0; }   // older sa3.dll without the function
+
+  const std::string safet = exportedBase + ".safetensors";
+  const std::string json  = exportedBase + ".json";
+  char err[512] = {};
+  const int rc = fn(safet.c_str(), json.c_str(), destination.c_str(), err, (int)sizeof err);
+  FreeLibrary(dll);
+  if (rc != 0) { error = std::string("libsa3 convert: ") + err; return -1; }
+  return 1;
+}
+#endif
+
 bool ConvertLoraToGguf(const std::string& exportedBase, const std::string& destination, std::string& error)
 {
+#if defined(_WIN32)
+  // Prefer the native in-process converter (no Python); fall back to the .venv script only if unavailable.
+  {
+    std::string nativeErr;
+    const int native = TryNativeConvertLora(exportedBase, destination, nativeErr);
+    if (native == 1)
+    {
+      if (!FileExists(destination)) { error = "converter did not create a gguf file"; return false; }
+      return true;
+    }
+    if (native == -1) { error = nativeErr; return false; }   // conversion genuinely failed
+    // native == 0: sa3.dll/function unavailable -> fall through to the Python converter
+  }
+#endif
   const std::string sa3Root = Sa3CppDirectory();
   const std::string script = JoinPath(JoinPath(sa3Root, "tools"), "convert_lora.py");
   if (!FileExists(script))

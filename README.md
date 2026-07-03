@@ -43,9 +43,9 @@ It reuses some UI concepts and audio-file handling from [gary4juce](https://gith
 
 Paths below use `<sa3.cpp>` for your sa3.cpp checkout (the `SA3_CPP_DIR` you configured — a sibling checkout by default).
 
-The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. `.gguf` files are copied directly. `.safetensors` imports are converted with `<sa3.cpp>/tools/convert_lora.py` when the matching metadata JSON exists. `.ckpt` imports use the same conversion path after finding the exported `.safetensors`/`.json` pair beside the checkpoint or in the parent LoRA folder.
+The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. `.gguf` files are copied directly. `.safetensors` imports are converted to gguf **in-process by `libsa3` (`sa3_convert_lora`) — no Python needed** — as long as the matching `.json` metadata sits beside them. `.ckpt` imports use that same in-process conversion once an exported `.safetensors`/`.json` pair is found beside the checkpoint or in the parent LoRA folder.
 
-Raw `.ckpt` export still requires the Python/PyTorch helper in `sa3.cpp` first:
+Producing that `.safetensors`/`.json` pair from a raw `.ckpt` is the one step that still needs Python (a checkpoint is a PyTorch artifact) — run the helper in `sa3.cpp` once per checkpoint:
 
 ```powershell
 <sa3.cpp>\.venv\Scripts\python.exe <sa3.cpp>\tools\lora_ckpt_export.py --ckpt <sa3.cpp>\loras\kev\kev.ckpt --out <sa3.cpp>\loras\kev

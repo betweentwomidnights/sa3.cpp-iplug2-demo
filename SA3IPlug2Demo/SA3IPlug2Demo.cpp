@@ -806,11 +806,16 @@ private:
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
                "key", IRECT(bounds.L + 118.f, bounds.T, bounds.R - 150.f, bounds.B));
     mKeyRootRect = IRECT(bounds.R - 144.f, bounds.T + 1.f, bounds.R - 78.f, bounds.B - 1.f);
-    mKeyModeRect = IRECT(bounds.R - 74.f, bounds.T + 1.f, bounds.R, bounds.B - 1.f);
+    mKeyModeRect = {};
     static const char* kRoots[13] = {"none", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     const int root = std::clamp(mPlugin.KeyRoot(), 0, 12);
     DrawDropButton(g, mKeyRootRect, kRoots[root]);
-    DrawDropButton(g, mKeyModeRect, mPlugin.KeyMode() ? "minor" : "major");   // key applies only when root != none
+    // major/minor only appears once a root is chosen (nothing is appended when key = none)
+    if (root > 0)
+    {
+      mKeyModeRect = IRECT(bounds.R - 74.f, bounds.T + 1.f, bounds.R, bounds.B - 1.f);
+      DrawDropButton(g, mKeyModeRect, mPlugin.KeyMode() ? "minor" : "major");
+    }
   }
 
   void DrawLoopControls(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)
