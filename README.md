@@ -8,11 +8,11 @@ i don't rly expect to maintain this project much, because we may end up rolling 
 
 i'm still not sure if i prefer embedding the model directly inside a vst like this, and may instead continue to
 use a "companion application" such as
-[gary4local](https://github.com/betweentwomidnights/gary-localhost-installer) for use inside the DAW. there are
+[gary4local](https://github.com/betweentwomidnights/gary-localhost-installer) for communicating with plugins/[extensions](https://github.com/betweentwomidnights/sa3-ableton-extension) inside the DAW. there are
 trade-offs to both. and because you need a separate application to train LoRAs anyway, the companion app still
 makes a whole lot of sense.
 
-for now this is just a demo. it helped us find gaps in the libsa3 package and the underlying pipeline.
+for now this is just a demo. it helped us find gaps in the **libsa3** package and the underlying pipeline.
 
 if you do want to build this project and play with it, here's claude doing his best to tell you how:
 
@@ -20,7 +20,7 @@ if you do want to build this project and play with it, here's claude doing his b
 
 The one thing worth calling out up front: unlike gary4juce (which talks to a local server over HTTP), this plugin
 calls `libsa3` **in-process** — embedding the model directly in the plugin is the whole point of the experiment.
-It reuses a few UI/audio-file helpers from gary-in-the-plug.
+It reuses some UI concepts and audio-file handling from [gary4juce](https://github.com/betweentwomidnights/gary4juce).
 
 ## Current scope
 
@@ -136,7 +136,7 @@ Copy-Item -LiteralPath .\build\out\SA3IPlug2Demo.vst3 -Destination $userVst3 -Re
 The current validated metadata is:
 
 - vendor: `the collabage patch`
-- version: `0.1.3`
+- version: `0.2.0`
 - VST3 validator: `47 tests passed, 0 tests failed`
 
 ## Playback crackle triage

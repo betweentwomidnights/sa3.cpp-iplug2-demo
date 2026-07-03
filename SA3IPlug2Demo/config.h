@@ -2,8 +2,8 @@
 
 #define PLUG_NAME "SA3IPlug2Demo"
 #define PLUG_MFR "the collabage patch"
-#define PLUG_VERSION_HEX 0x00010300
-#define PLUG_VERSION_STR "0.1.3"
+#define PLUG_VERSION_HEX 0x00020000
+#define PLUG_VERSION_STR "0.2.0"
 #define PLUG_UNIQUE_ID 'S3id'
 #define PLUG_MFR_ID 'Tcpa'
 #define PLUG_URL_STR "https://github.com/betweentwomidnights/sa3.cpp"
