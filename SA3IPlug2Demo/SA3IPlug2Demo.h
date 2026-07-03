@@ -89,9 +89,16 @@ public:
   void SetDurationSeconds(int seconds);
   void SetSteps(int steps);
   void SetInitNoiseLevel(float level);
+  void SetUseSeed(bool useSeed);
+  void ToggleUseSeed();
+  void SetSeedValue(int64_t seed);
   int DurationSeconds() const noexcept { return mDurationSeconds.load(std::memory_order_acquire); }
   int Steps() const noexcept { return mSteps.load(std::memory_order_acquire); }
   float InitNoiseLevel() const noexcept { return mInitNoiseLevel.load(std::memory_order_acquire); }
+  bool UseSeed() const noexcept { return mUseSeed.load(std::memory_order_acquire); }
+  int64_t SeedValue() const noexcept { return mSeedValue.load(std::memory_order_acquire); }
+  int64_t LastSeed() const noexcept { return mLastSeed.load(std::memory_order_acquire); }
+  bool HasLastSeed() const noexcept { return mHasLastSeed.load(std::memory_order_acquire); }
   float Progress() const noexcept { return mProgress.load(std::memory_order_acquire); }
   bool Busy() const noexcept { return mBusy.load(std::memory_order_acquire); }
   bool TransportRunning() const noexcept { return mTransportRunning.load(std::memory_order_acquire); }
@@ -126,6 +133,8 @@ private:
     int durationSeconds = 12;
     int steps = 8;
     float initNoiseLevel = 0.85f;
+    bool useSeed = false;
+    int64_t seed = 0;
     std::vector<std::vector<float>> sourceChannels;
     int sourceSamples = 0;
     int sourceSampleRate = 44100;
@@ -165,6 +174,10 @@ private:
   std::atomic<int> mDurationSeconds{12};
   std::atomic<int> mSteps{8};
   std::atomic<float> mInitNoiseLevel{0.85f};
+  std::atomic<bool> mUseSeed{false};
+  std::atomic<int64_t> mSeedValue{0};
+  std::atomic<int64_t> mLastSeed{0};
+  std::atomic<bool> mHasLastSeed{false};
   std::atomic<float> mProgress{0.0f};
   std::atomic<bool> mBusy{false};
   std::atomic<bool> mTransportRunning{false};

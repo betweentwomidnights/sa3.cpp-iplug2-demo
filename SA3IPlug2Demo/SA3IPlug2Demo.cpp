@@ -15,11 +15,13 @@
 #endif
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <random>
 
 #ifndef SA3_DEMO_DEFAULT_MODELS_DIR
@@ -44,6 +46,35 @@ size_t FitChars(float width, float approxCharWidth, size_t minChars, size_t maxC
 {
   const size_t fitted = static_cast<size_t>(std::max(1.f, width / std::max(1.f, approxCharWidth)));
   return std::clamp(fitted, minChars, maxChars);
+}
+
+int64_t RequestableSeed(uint64_t seed) noexcept
+{
+  return static_cast<int64_t>(seed & static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
+}
+
+int64_t ParseSeedText(const char* text, int64_t fallback) noexcept
+{
+  if (!text)
+    return fallback;
+
+  while (std::isspace(static_cast<unsigned char>(*text)) != 0)
+    ++text;
+  if (*text == '\0' || *text == '-')
+    return fallback;
+
+  errno = 0;
+  char* end = nullptr;
+  const unsigned long long parsed = std::strtoull(text, &end, 10);
+  if (end == text)
+    return fallback;
+  while (end && std::isspace(static_cast<unsigned char>(*end)) != 0)
+    ++end;
+  if (end && *end != '\0')
+    return fallback;
+  if (errno == ERANGE || parsed > static_cast<unsigned long long>(std::numeric_limits<int64_t>::max()))
+    return std::numeric_limits<int64_t>::max();
+  return static_cast<int64_t>(parsed);
 }
 
 std::string FileNameFromPath(const std::string& path)
@@ -230,6 +261,8 @@ class SA3DemoControl final : public IControl
     DurationSlider,
     StepsSlider,
     NoiseSlider,
+    SeedToggle,
+    SeedField,
     Run,
     AddLora,
     LoraToggle,
@@ -247,6 +280,13 @@ class SA3DemoControl final : public IControl
     Steps,
     Noise,
     Lora
+  };
+
+  enum class EditTarget
+  {
+    None,
+    Prompt,
+    Seed
   };
 
   struct HitResult
@@ -304,7 +344,7 @@ public:
     DrawPrompt(g, IRECT(left, y, right, y + 48.f), mode);
     y += 56.f;
 
-    y = DrawModeControls(g, IRECT(left, y, right, y + 72.f), mode) + 8.f;
+    y = DrawModeControls(g, IRECT(left, y, right, y + 104.f), mode) + 8.f;
     const float loraPanelHeight = mPlugin.Loras().empty() ? 76.f : 108.f;
     y = DrawLoraPanel(g, IRECT(left, y, right, y + loraPanelHeight)) + 8.f;
 
@@ -315,7 +355,7 @@ public:
                IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
     y += 42.f;
 
-    const float outputHeight = std::min(250.f, std::max(160.f, shell.B - y - 14.f));
+    const float outputHeight = std::min(190.f, std::max(150.f, shell.B - y - 14.f));
     const IRECT outputRect(left, y, right, y + outputHeight);
     DrawOutputPanel(g, outputRect);
   }
@@ -336,13 +376,15 @@ public:
         const auto mode = mPlugin.CurrentRenderMode();
         if (GetUI())
         {
+          mEditTarget = EditTarget::Prompt;
+          mEditPromptMode = mode;
           const IText promptEntryText = IText(14.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle)
                                           .WithTEColors(gary::ui::PanelDark(), COLOR_WHITE);
           GetUI()->CreateTextEntry(*this,
                                    promptEntryText,
                                    mPromptRect,
                                    mPlugin.PromptForMode(mode).c_str(),
-                                   PromptEntryIndex(mode));
+                                   0);
         }
         return;
       }
@@ -353,6 +395,20 @@ public:
       case Hit::DurationSlider: mActiveSlider = Slider::Duration; UpdateSliderFromX(x); return;
       case Hit::StepsSlider:    mActiveSlider = Slider::Steps;    UpdateSliderFromX(x); return;
       case Hit::NoiseSlider:    mActiveSlider = Slider::Noise;    UpdateSliderFromX(x); return;
+      case Hit::SeedToggle:     mPlugin.ToggleUseSeed(); SetDirty(false); return;
+      case Hit::SeedField:
+        if (GetUI())
+        {
+          const int64_t editSeed = mPlugin.UseSeed() ? mPlugin.SeedValue()
+                                  : mPlugin.HasLastSeed() ? mPlugin.LastSeed()
+                                                          : 0;
+          mEditTarget = EditTarget::Seed;
+          const IText seedEntryText = IText(13.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle)
+                                      .WithTEColors(gary::ui::PanelDark(), COLOR_WHITE);
+          const std::string seedText = std::to_string(std::max<int64_t>(0, editSeed));
+          GetUI()->CreateTextEntry(*this, seedEntryText, mSeedFieldRect, seedText.c_str(), 0);
+        }
+        return;
       case Hit::LoraSlider:     mActiveSlider = Slider::Lora; mActiveLoraIndex = hit.index; UpdateSliderFromX(x); return;
       case Hit::LoraToggle:     ToggleLora(hit.index); SetDirty(false); return;
       case Hit::LoraRemove:     mPlugin.RemoveLora(hit.index); SetDirty(false); return;
@@ -442,13 +498,22 @@ public:
 
   void OnTextEntryCompletion(const char* str, int valIdx) override
   {
-    switch (valIdx)
+    switch (mEditTarget)
     {
-      case 1: mPlugin.SetPromptForMode(SA3IPlug2Demo::RenderMode::Text, str); break;
-      case 2: mPlugin.SetPromptForMode(SA3IPlug2Demo::RenderMode::Transform, str); break;
-      case 3: mPlugin.SetPromptForMode(SA3IPlug2Demo::RenderMode::Continue, str); break;
-      default: break;
+      case EditTarget::Prompt:
+        mPlugin.SetPromptForMode(mEditPromptMode, str);
+        break;
+      case EditTarget::Seed:
+      {
+        const int64_t parsed = ParseSeedText(str, mPlugin.SeedValue());
+        mPlugin.SetSeedValue(parsed);
+        mPlugin.SetUseSeed(true);
+        break;
+      }
+      case EditTarget::None:
+        break;
     }
+    mEditTarget = EditTarget::None;
     SetDirty(false);
   }
 
@@ -464,17 +529,6 @@ private:
     return "generate";
   }
 
-  static int PromptEntryIndex(SA3IPlug2Demo::RenderMode mode)
-  {
-    switch (mode)
-    {
-      case SA3IPlug2Demo::RenderMode::Text: return 1;
-      case SA3IPlug2Demo::RenderMode::Transform: return 2;
-      case SA3IPlug2Demo::RenderMode::Continue: return 3;
-    }
-    return 1;
-  }
-
   HitResult HitTest(float x, float y) const
   {
     if (mDiceRect.Contains(x, y)) return {Hit::Dice, 0};
@@ -485,6 +539,8 @@ private:
     if (mDurationSliderRect.Contains(x, y)) return {Hit::DurationSlider, 0};
     if (mStepsSliderRect.Contains(x, y)) return {Hit::StepsSlider, 0};
     if (mNoiseSliderRect.Contains(x, y)) return {Hit::NoiseSlider, 0};
+    if (mSeedToggleRect.Contains(x, y)) return {Hit::SeedToggle, 0};
+    if (mSeedFieldRect.Contains(x, y)) return {Hit::SeedField, 0};
     for (size_t i = 0; i < mLoraSliderRects.size(); ++i)
       if (mLoraSliderRects[i].Contains(x, y)) return {Hit::LoraSlider, i};
     for (size_t i = 0; i < mLoraToggleRects.size(); ++i)
@@ -560,6 +616,8 @@ private:
   {
     mDurationSliderRect = {};
     mNoiseSliderRect = {};
+    mSeedToggleRect = {};
+    mSeedFieldRect = {};
     float y = bounds.T;
 
     char value[32] = {};
@@ -582,7 +640,39 @@ private:
     std::snprintf(value, sizeof value, "%d", mPlugin.Steps());
     DrawSlider(g, IRECT(bounds.L, y, bounds.R, y + 26.f), "steps", value,
                (float)mPlugin.Steps(), 1.f, 64.f, mStepsSliderRect);
+    y += 32.f;
+
+    DrawSeedControls(g, IRECT(bounds.L, y, bounds.R, y + 26.f));
     return y + 26.f;
+  }
+
+  void DrawSeedControls(IGraphics& g, const IRECT& bounds)
+  {
+    using namespace gary::ui;
+    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               "seed", IRECT(bounds.L, bounds.T, bounds.L + 86.f, bounds.B));
+
+    mSeedToggleRect = IRECT(bounds.L + 92.f, bounds.MH() - 8.f, bounds.L + 108.f, bounds.MH() + 8.f);
+    g.DrawRoundRect(mPlugin.UseSeed() ? Red() : Frame(), mSeedToggleRect, 2.f);
+    if (mPlugin.UseSeed())
+      g.FillRoundRect(Red(), mSeedToggleRect.GetPadded(-4.f), 1.f);
+    g.DrawText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
+               "use", IRECT(mSeedToggleRect.R + 6.f, bounds.T, mSeedToggleRect.R + 40.f, bounds.B));
+
+    mSeedFieldRect = IRECT(bounds.L + 142.f, bounds.T + 1.f, bounds.R - 92.f, bounds.B - 1.f);
+    g.FillRoundRect(ButtonFill(), mSeedFieldRect, 3.f);
+    g.DrawRoundRect(Frame(), mSeedFieldRect, 3.f);
+    const int64_t visibleSeed = mPlugin.UseSeed() ? mPlugin.SeedValue()
+                              : mPlugin.HasLastSeed() ? mPlugin.LastSeed()
+                                                      : 0;
+    const std::string seedText = (mPlugin.UseSeed() || mPlugin.HasLastSeed()) ? std::to_string(visibleSeed) : std::string("random");
+    g.DrawText(IText(11.f, mPlugin.UseSeed() ? COLOR_WHITE : TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               CompactText(seedText, FitChars(mSeedFieldRect.W() - 12.f, 6.f, 4, 24)).c_str(),
+               mSeedFieldRect.GetPadded(-6.f));
+
+    const std::string lastText = mPlugin.HasLastSeed() ? "last " + CompactText(std::to_string(mPlugin.LastSeed()), 8) : "last -";
+    g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
+               lastText.c_str(), IRECT(bounds.R - 86.f, bounds.T, bounds.R, bounds.B));
   }
 
   float DrawLoraPanel(IGraphics& g, const IRECT& bounds)
@@ -762,12 +852,15 @@ private:
   IRECT mDiceRect;
   IRECT mGenerateTabRect, mTransformTabRect, mContinueTabRect;
   IRECT mDurationSliderRect, mStepsSliderRect, mNoiseSliderRect;
+  IRECT mSeedToggleRect, mSeedFieldRect;
   IRECT mRunRect, mAddLoraRect;
   std::vector<IRECT> mLoraToggleRects;
   std::vector<IRECT> mLoraRemoveRects;
   std::vector<IRECT> mLoraSliderRects;
   IRECT mOutputWaveformRect, mOutputPlayRect, mOutputStopRect, mOutputSaveRect;
   Slider mActiveSlider = Slider::None;
+  EditTarget mEditTarget = EditTarget::None;
+  SA3IPlug2Demo::RenderMode mEditPromptMode = SA3IPlug2Demo::RenderMode::Text;
   size_t mActiveLoraIndex = 0;
   bool mOutputPointerDown = false;
   bool mOutputDragStarted = false;
@@ -1013,6 +1106,27 @@ void SA3IPlug2Demo::SetSteps(int steps)
 void SA3IPlug2Demo::SetInitNoiseLevel(float level)
 {
   mInitNoiseLevel.store(std::clamp(level, 0.01f, 1.0f), std::memory_order_release);
+}
+
+void SA3IPlug2Demo::SetUseSeed(bool useSeed)
+{
+  if (useSeed && mSeedValue.load(std::memory_order_acquire) <= 0
+      && mHasLastSeed.load(std::memory_order_acquire))
+  {
+    const int64_t lastSeed = mLastSeed.load(std::memory_order_acquire);
+    mSeedValue.store(lastSeed, std::memory_order_release);
+  }
+  mUseSeed.store(useSeed, std::memory_order_release);
+}
+
+void SA3IPlug2Demo::ToggleUseSeed()
+{
+  SetUseSeed(!mUseSeed.load(std::memory_order_acquire));
+}
+
+void SA3IPlug2Demo::SetSeedValue(int64_t seed)
+{
+  mSeedValue.store(std::max<int64_t>(0, seed), std::memory_order_release);
 }
 
 void SA3IPlug2Demo::StartRender(RenderMode mode)
@@ -1465,6 +1579,8 @@ SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
   input.durationSeconds = DurationSeconds();
   input.steps = Steps();
   input.initNoiseLevel = InitNoiseLevel();
+  input.useSeed = UseSeed();
+  input.seed = SeedValue();
   {
     std::lock_guard<std::mutex> lock(mSourceMutex);
     input.sourceChannels = mSourceBuffer;
@@ -1541,7 +1657,7 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   req.request.prompt = input.prompt.c_str();
   req.request.frames = std::max(1, (int)(input.durationSeconds * 44100.0 / 4096.0 + 0.5));
   req.request.steps = input.steps;
-  req.request.seed = -1;
+  req.request.seed = input.useSeed ? input.seed : -1;
   req.request.cfg_scale = 1.0f;
   req.request.duration_padding_sec = input.mode == RenderMode::Text ? 6.0f : 0.0f;
   req.request.keep_models = 0;
@@ -1632,6 +1748,8 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     return;
   }
 
+  mLastSeed.store(RequestableSeed(audio.seed), std::memory_order_release);
+  mHasLastSeed.store(true, std::memory_order_release);
   InstallOutputFromPlanar(audio.samples, audio.n_samp, audio.n_ch, audio.sample_rate);
   sa3->freeAudio(&audio);
   SaveOutputToDisk();
