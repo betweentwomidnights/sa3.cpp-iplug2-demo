@@ -1,4 +1,4 @@
-# sa3-iplug2-demo
+# sa3 medium embedded in iPlug2 as c++
 
 this is just an example vst for exploring and validating **libsa3** from
 [sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp).
