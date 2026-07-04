@@ -20,12 +20,15 @@
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <random>
+#include <thread>
 
 // The build system (CMakeLists) always sets this from SA3_CPP_DIR; overridable at runtime with SA3_MODELS_DIR.
 #ifndef SA3_DEMO_DEFAULT_MODELS_DIR
@@ -320,6 +323,7 @@ class SA3DemoControl final : public IControl
     None,
     Prompt,
     Dice,
+    Models,
     TabGenerate,
     TabTransform,
     TabContinue,
@@ -394,15 +398,28 @@ public:
     const SA3IPlug2Demo::RenderMode mode = mPlugin.CurrentRenderMode();
 
     g.DrawText(IText(20.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               "sa3 embedded", IRECT(left, y, shell.MW(), y + 26.f));
-    g.DrawText(IText(12.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               CompactText(mPlugin.ModelsDir(), FitChars(right - shell.MW(), 6.5f, 12, 42)).c_str(), IRECT(shell.MW(), y, right, y + 26.f));
+               "sa3 embedded", IRECT(left, y, left + 150.f, y + 26.f));
+    // "models" button (download / point-at-folder) + a ready/no-models indicator to its left.
+    mModelsBtnRect = IRECT(right - 62.f, y + 2.f, right, y + 24.f);
+    DrawButton(g, mModelsBtnRect, "models", kDemoFont);
+    {
+      const bool present = mPlugin.ModelsPresent();
+      const bool downloading = mPlugin.Downloading();
+      const IColor c = downloading ? TextDim() : present ? Green() : Red();
+      const std::string label = downloading ? "downloading…"
+                              : present ? (mPlugin.ModelVariant() + " ready")
+                                        : "no models — set up →";
+      g.DrawText(IText(12.f, c, kDemoFont, EAlign::Far, EVAlign::Middle),
+                 label.c_str(), IRECT(left + 154.f, y, mModelsBtnRect.L - 8.f, y + 26.f));
+    }
     y += 30.f;
 
-    const float progress = std::clamp(mPlugin.Progress(), 0.f, 1.f);
+    // The status bar doubles as the download meter (download runs off the audio thread, so it's safe here).
+    const bool downloading = mPlugin.Downloading();
+    const float progress = std::clamp(downloading ? mPlugin.DownloadProgress() : mPlugin.Progress(), 0.f, 1.f);
     const IRECT statusRect(left, y, right, y + 22.f);
     g.FillRoundRect(PanelDark(), statusRect, 3.f);
-    if (mPlugin.Busy())
+    if (mPlugin.Busy() || downloading)
       g.FillRoundRect(RedDim(), IRECT(statusRect.L, statusRect.T, statusRect.L + statusRect.W() * progress, statusRect.B), 3.f);
     g.DrawRoundRect(FrameSoft(), statusRect, 3.f);
     g.DrawText(IText(12.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
@@ -424,12 +441,16 @@ public:
     y = DrawLoraPanel(g, IRECT(left, y, right, y + loraPanelHeight)) + 8.f;
 
     mRunRect = IRECT(left, y, left + 180.f, y + 32.f);
-    const bool canRender = mPlugin.Busy() || mPlugin.CanRender(mode);   // transform/continue need a frozen snapshot
+    const bool canRender = mPlugin.Busy() || mPlugin.CanRender(mode);   // needs models (+ a snapshot for a2a)
     DrawButton(g, mRunRect, mPlugin.Busy() ? "cancel" : ActionLabel(mode), kDemoFont, false, canRender);
-    const char* runHint = !canRender ? "drop audio or save a recorded buffer first"
-                        : mPlugin.TransportRunning() ? "host rolling: recording input" : "host stopped";
+    std::string runHint;
+    if (mPlugin.Downloading())            runHint = "downloading models…";
+    else if (!mPlugin.ModelsPresent())    runHint = "click 'models' to download or locate your models";
+    else if (!canRender)                  runHint = "drop audio or save a recorded buffer first";
+    else if (mPlugin.TransportRunning())  runHint = "host rolling: recording input";
+    else                                  runHint = "host stopped";
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               runHint, IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
+               runHint.c_str(), IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
     y += 42.f;
 
     const float outputHeight = std::min(190.f, std::max(150.f, shell.B - y - 14.f));
@@ -466,6 +487,7 @@ public:
         return;
       }
       case Hit::Dice:          mPlugin.RollPromptForCurrentMode(); SetDirty(false); return;
+      case Hit::Models:        OpenModelsMenu(); return;
       case Hit::TabGenerate:  mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Text); SetDirty(false); return;
       case Hit::TabTransform: mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Transform); SetDirty(false); return;
       case Hit::TabContinue:  mPlugin.SetCurrentRenderMode(SA3IPlug2Demo::RenderMode::Continue); SetDirty(false); return;
@@ -609,6 +631,20 @@ public:
           mPlugin.SetKeyMode(idx);
         else if (mActivePopup == Popup::DistShift)  // 0=LogSNR,1=Flux,2=Full,3=None
           mPlugin.SetDistShift(idx);
+        else if (mActivePopup == Popup::Models)
+        {
+          const int action = (idx >= 0 && idx < (int)mModelsActions.size()) ? mModelsActions[idx] : kSep;
+          switch (action)
+          {
+            case kCancelDl:  mPlugin.CancelModelDownload(); break;
+            case kUseMedium: mPlugin.SelectVariant("medium"); break;
+            case kUseSmall:  mPlugin.SelectVariant("small-music"); break;
+            case kDlMedium:  StartDownloadFlow(0); break;
+            case kDlSmall:   StartDownloadFlow(1); break;
+            case kPoint:     PointAtFolderFlow(); break;
+            default:         break;   // separator / no-op
+          }
+        }
       }
     }
     mActivePopup = Popup::None;
@@ -651,6 +687,7 @@ private:
   HitResult HitTest(float x, float y) const
   {
     if (mDiceRect.Contains(x, y)) return {Hit::Dice, 0};
+    if (mModelsBtnRect.Contains(x, y)) return {Hit::Models, 0};
     if (mPromptRect.Contains(x, y)) return {Hit::Prompt, 0};
     if (mGenerateTabRect.Contains(x, y)) return {Hit::TabGenerate, 0};
     if (mTransformTabRect.Contains(x, y)) return {Hit::TabTransform, 0};
@@ -1081,6 +1118,87 @@ private:
     GetUI()->CreatePopupMenu(*this, mKeyMenu, mDistShiftRect);
   }
 
+  // Action codes for the dynamic models menu (see mModelsActions).
+  enum ModelsAction { kCancelDl = 9, kUseMedium = 10, kUseSmall = 11, kDlMedium = 0, kDlSmall = 1, kPoint = 2, kSep = -1 };
+
+  void OpenModelsMenu()
+  {
+    if (!GetUI())
+      return;
+    mKeyMenu.Clear();
+    mModelsActions.clear();
+    auto add = [&](const char* label, int action, bool checked = false) {
+      mKeyMenu.AddItem(label);
+      if (checked)
+        mKeyMenu.CheckItem(mKeyMenu.NItems() - 1, true);
+      mModelsActions.push_back(action);
+    };
+
+    if (mPlugin.Downloading())   // while a download runs the menu is just a cancel affordance
+    {
+      add("cancel download", kCancelDl);
+      mActivePopup = Popup::Models;
+      GetUI()->CreatePopupMenu(*this, mKeyMenu, mModelsBtnRect);
+      return;
+    }
+
+    // Radio row: whichever variants are actually present in the current folder can be selected for generation.
+    const std::string active = mPlugin.ModelVariant();
+    const bool mediumHere = mPlugin.VariantAvailable("medium");
+    const bool smallHere = mPlugin.VariantAvailable("small-music");
+    if (mediumHere)
+      add("use medium", kUseMedium, active == "medium");
+    if (smallHere)
+      add("use small-music", kUseSmall, active == "small-music");
+    if (mediumHere || smallHere)
+    {
+      mKeyMenu.AddSeparator();
+      mModelsActions.push_back(kSep);
+    }
+
+    add("download medium (~5.7 GB)", kDlMedium);
+    add("download small-music (~2.3 GB)", kDlSmall);
+    add("point at an existing folder…", kPoint);
+    mActivePopup = Popup::Models;
+    GetUI()->CreatePopupMenu(*this, mKeyMenu, mModelsBtnRect);
+  }
+
+  // Open the OS directory picker (cross-platform via IGraphics) seeded at `seed`; returns "" if cancelled.
+  std::string PickDirectory(const std::string& seed)
+  {
+    if (!GetUI())
+      return {};
+    WDL_String dir;
+    if (!seed.empty())
+      dir.Set(seed.c_str());
+    GetUI()->PromptForDirectory(dir);
+    return dir.GetLength() > 0 ? std::string(dir.Get()) : std::string();
+  }
+
+  void StartDownloadFlow(int variantIdx)
+  {
+    const std::string dest = PickDirectory(gary::DefaultModelsDirectory());
+    if (!dest.empty())
+      mPlugin.StartModelDownload(variantIdx, dest);
+    SetDirty(false);
+  }
+
+  void PointAtFolderFlow()
+  {
+    const std::string dir = PickDirectory(mPlugin.ModelsPresent() ? mPlugin.ModelsDir() : gary::DefaultModelsDirectory());
+    if (dir.empty())
+      return;
+    // Accept whichever complete variant the folder actually holds; else report medium's missing list.
+    std::vector<std::string> missing;
+    if (gary::ModelSetComplete(dir, "medium", "f16", missing))
+      mPlugin.UseModelsFolder(dir, "medium", true);
+    else if (gary::ModelSetComplete(dir, "small-music", "f16", missing))
+      mPlugin.UseModelsFolder(dir, "small-music", true);
+    else
+      mPlugin.UseModelsFolder(dir, "medium", true);
+    SetDirty(false);
+  }
+
   void DrawWaveform(IGraphics& g, const IRECT& bounds, const SA3IPlug2Demo::Waveform& wf,
                     const IColor& brightColor, const IColor& dimColor)
   {
@@ -1164,6 +1282,7 @@ private:
   SA3IPlug2Demo& mPlugin;
   IRECT mPromptRect;
   IRECT mDiceRect;
+  IRECT mModelsBtnRect;
   IRECT mGenerateTabRect, mTransformTabRect, mContinueTabRect;
   IRECT mDurationSliderRect, mStepsSliderRect, mCfgSliderRect, mNoiseSliderRect;
   IRECT mSeedToggleRect, mSeedFieldRect;
@@ -1178,8 +1297,11 @@ private:
   IRECT mSaveBufferRect;
   IRECT mOutputWaveformRect, mOutputPlayRect, mOutputStopRect;
   Slider mActiveSlider = Slider::None;
-  enum class Popup { None, KeyRoot, KeyMode, DistShift } mActivePopup = Popup::None;
+  enum class Popup { None, KeyRoot, KeyMode, DistShift, Models } mActivePopup = Popup::None;
   IPopupMenu mKeyMenu;
+  // One action code per item in the (dynamic) models menu, index-aligned with the menu items so a chosen
+  // index maps straight to an action. See ModelsAction.
+  std::vector<int> mModelsActions;
   EditTarget mEditTarget = EditTarget::None;
   SA3IPlug2Demo::RenderMode mEditPromptMode = SA3IPlug2Demo::RenderMode::Text;
   size_t mActiveLoraIndex = 0;
@@ -1200,6 +1322,21 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
   ResizeRecordBuffer(44100.0);
   mHostSampleRate.store(44100, std::memory_order_release);
   LoadPersistedBuffer();   // restore myBuffer.wav (frozen init snapshot) from a previous session
+
+  // Restore the persisted models dir + variant (settings.txt), then scan for the file set. Precedence is
+  // persisted setting -> SA3_MODELS_DIR env -> compile default; see ModelsDir().
+  {
+    const std::string savedDir = gary::LoadSetting("models_dir");
+    const std::string savedVariant = gary::LoadSetting("variant");
+    std::lock_guard<std::mutex> lock(mModelsMutex);
+    if (!savedDir.empty())
+      mModelsDirSetting = savedDir;
+    if (savedVariant == "small-music" || savedVariant == "small-sfx")
+      mModelVariant = "small-music";
+    else if (savedVariant == "medium")
+      mModelVariant = "medium";
+  }
+  RefreshModelsPresent();
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
@@ -1231,12 +1368,8 @@ int SA3IPlug2Demo::ModeIndex(RenderMode mode) noexcept
 SA3IPlug2Demo::~SA3IPlug2Demo()
 {
   StopWorker();
-  if (mContext)
-  {
-    if (const Sa3Api* sa3 = LoadedSa3Api())
-      sa3->freeContext(mContext);
-    mContext = nullptr;
-  }
+  StopDownloadWorker();
+  TeardownContext();
 }
 
 #if IPLUG_DSP
@@ -1405,9 +1538,112 @@ std::string SA3IPlug2Demo::OutputStatusText() const
 
 std::string SA3IPlug2Demo::ModelsDir() const
 {
+  {
+    std::lock_guard<std::mutex> lock(mModelsMutex);
+    if (!mModelsDirSetting.empty())
+      return mModelsDirSetting;
+  }
   if (const char* e = std::getenv("SA3_MODELS_DIR"))
     if (*e) return e;
   return SA3_DEMO_DEFAULT_MODELS_DIR;
+}
+
+std::string SA3IPlug2Demo::ModelVariant() const
+{
+  std::lock_guard<std::mutex> lock(mModelsMutex);
+  return mModelVariant;
+}
+
+int SA3IPlug2Demo::ModelVariantIndex() const
+{
+  return ModelVariant() == "small-music" ? 1 : 0;
+}
+
+void SA3IPlug2Demo::RefreshModelsPresent()
+{
+  const std::string dir = ModelsDir();
+  const std::string variant = ModelVariant();
+  std::vector<std::string> missing;
+  const bool present = gary::ModelSetComplete(dir, variant, "f16", missing);
+  mModelsPresent.store(present, std::memory_order_release);
+}
+
+void SA3IPlug2Demo::TeardownContext()
+{
+  if (mContext)
+  {
+    if (const Sa3Api* sa3 = LoadedSa3Api())
+      sa3->freeContext(mContext);
+    mContext = nullptr;
+  }
+}
+
+bool SA3IPlug2Demo::UseModelsFolder(const std::string& dir, const std::string& variant, bool persist)
+{
+  const std::string v = (variant == "small-music" || variant == "small-sfx") ? "small-music" : "medium";
+  std::vector<std::string> missing;
+  if (!gary::ModelSetComplete(dir, v, "f16", missing))
+  {
+    std::string msg = "that folder is missing: ";
+    for (size_t i = 0; i < missing.size(); ++i)
+      msg += (i ? ", " : "") + missing[i];
+    SetStatus(msg);
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mModelsMutex);
+    mModelsDirSetting = dir;
+    mModelVariant = v;
+  }
+  // A previously loaded context may be a different variant/dir — drop it so the next render reloads.
+  // Safe here: this is called from the UI thread and generation is gated off while no models were present.
+  if (!mBusy.load(std::memory_order_acquire))
+    TeardownContext();
+  mModelsPresent.store(true, std::memory_order_release);
+  if (persist)
+  {
+    gary::SaveSetting("models_dir", dir);
+    gary::SaveSetting("variant", v);
+  }
+  SetStatus("models ready (" + v + "): " + dir);
+  return true;
+}
+
+bool SA3IPlug2Demo::VariantAvailable(const std::string& variant) const
+{
+  const std::string v = (variant == "small-music" || variant == "small-sfx") ? "small-music" : "medium";
+  std::vector<std::string> missing;
+  return gary::ModelSetComplete(ModelsDir(), v, "f16", missing);
+}
+
+bool SA3IPlug2Demo::SelectVariant(const std::string& variant)
+{
+  const std::string v = (variant == "small-music" || variant == "small-sfx") ? "small-music" : "medium";
+  if (!VariantAvailable(v))
+  {
+    SetStatus(v + " isn't in your models folder yet — download it first");
+    return false;
+  }
+
+  bool changed = false;
+  {
+    std::lock_guard<std::mutex> lock(mModelsMutex);
+    if (mModelVariant != v)
+    {
+      mModelVariant = v;
+      changed = true;
+    }
+  }
+  if (changed)
+  {
+    if (!mBusy.load(std::memory_order_acquire))
+      TeardownContext();   // the loaded context is the old variant — reload on next render
+    gary::SaveSetting("variant", v);
+  }
+  mModelsPresent.store(true, std::memory_order_release);
+  SetStatus("active model: " + v);
+  return true;
 }
 
 void SA3IPlug2Demo::SetCurrentRenderMode(RenderMode mode)
@@ -1478,6 +1714,17 @@ void SA3IPlug2Demo::SetSeedValue(int64_t seed)
 
 void SA3IPlug2Demo::StartRender(RenderMode mode)
 {
+  if (mDownloading.load(std::memory_order_acquire))
+  {
+    SetStatus("hang on — models are still downloading");
+    return;
+  }
+  if (!ModelsPresent())
+  {
+    SetStatus("get your models first — click 'models' to download or point at a folder");
+    return;
+  }
+
   if (mBusy.exchange(true, std::memory_order_acq_rel))
   {
     CancelRender();
@@ -1997,6 +2244,7 @@ SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
   input.bpm = Bpm();
   input.loopBars = (mode == RenderMode::Text) ? LoopBars() : 0;   // loops are Text-mode only
   input.distShift = DistShift();
+  input.variant = ModelVariant();
 
   // Build the prompt actually sent: base + optional " <bpm> bpm" + optional " C minor".
   // Mirrors gary4juce SA3UI (host tempo + key/scale get appended to the text prompt).
@@ -2061,11 +2309,11 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   char err[1024] = {};
   if (!mContext)
   {
-    SetStatus("loading libsa3 model");
+    SetStatus("loading libsa3 model (" + input.variant + ")");
     sa3_config cfg = {};
     const std::string models = ModelsDir();
     cfg.models_dir = models.c_str();
-    cfg.variant = "medium";
+    cfg.variant = input.variant.c_str();
     cfg.encoding = "f16";
     mContext = sa3->init(&cfg, err, (int)sizeof err);
     if (!mContext)
@@ -2101,7 +2349,10 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
 
   sa3_request_ex req = {};
   req.request.prompt = input.prompt.c_str();
-  req.request.frames = std::max(1, (int)(genSeconds * 44100.0 / 4096.0 + 0.5));
+  int frames = std::max(1, (int)(genSeconds * 44100.0 / 4096.0 + 0.5));
+  if (input.variant == "small-music" || input.variant == "small-sfx")
+    frames = std::max(2, frames & ~1);   // SAME-S needs an even frame count
+  req.request.frames = frames;
   req.request.steps = input.steps;
   req.request.seed = input.useSeed ? input.seed : -1;
   req.request.cfg_scale = input.cfgScale;
@@ -2214,6 +2465,197 @@ void SA3IPlug2Demo::StopWorker()
     mWorker.join();
   mBusy.store(false, std::memory_order_release);
   mCancelRequested.store(false, std::memory_order_release);
+}
+
+// ----- v0.3.0 model downloader (runs on its own worker thread; never the audio thread) ----------------
+
+namespace
+{
+std::string HumanBytes(long long bytes)
+{
+  if (bytes < 0)
+    return "?";
+  const double mb = (double)bytes / (1024.0 * 1024.0);
+  char text[32] = {};
+  if (mb >= 1024.0)
+    std::snprintf(text, sizeof text, "%.2f GB", mb / 1024.0);
+  else
+    std::snprintf(text, sizeof text, "%.0f MB", mb);
+  return text;
+}
+} // namespace
+
+void SA3IPlug2Demo::StartModelDownload(int variantIdx, const std::string& destDir)
+{
+  if (destDir.empty())
+  {
+    SetStatus("pick a destination folder first");
+    return;
+  }
+  if (mBusy.load(std::memory_order_acquire))
+  {
+    SetStatus("finish or cancel the current render before downloading");
+    return;
+  }
+  if (mDownloading.exchange(true, std::memory_order_acq_rel))
+    return;   // a download is already running
+
+  if (mDownloadWorker.joinable())
+    mDownloadWorker.join();
+  mDownloadCancel.store(false, std::memory_order_release);
+  mDownloadProgress.store(0.0f, std::memory_order_release);
+  mDownloadWorker = std::thread([this, variantIdx, destDir]() {
+    DownloadWorkerMain(variantIdx, destDir);
+  });
+}
+
+void SA3IPlug2Demo::CancelModelDownload()
+{
+  if (mDownloading.load(std::memory_order_acquire))
+  {
+    mDownloadCancel.store(true, std::memory_order_release);
+    SetStatus("cancelling download…");
+  }
+}
+
+void SA3IPlug2Demo::StopDownloadWorker()
+{
+  mDownloadCancel.store(true, std::memory_order_release);
+  if (mDownloadWorker.joinable())
+    mDownloadWorker.join();
+  mDownloading.store(false, std::memory_order_release);
+  mDownloadCancel.store(false, std::memory_order_release);
+}
+
+void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
+{
+  namespace fs = std::filesystem;
+  const std::string variant = (variantIdx == 1) ? "small-music" : "medium";
+  auto finish = [this]() {
+    mDownloadProgress.store(0.0f, std::memory_order_release);
+    mDownloading.store(false, std::memory_order_release);
+  };
+
+  const std::vector<gary::ModelDownloadItem> plan = gary::ModelPlan(variant, "f16");
+
+  // Probe sizes up front so the progress bar is byte-accurate. If any HEAD fails we fall back to a
+  // coarse file-count bar (still resumable/correct — just a less smooth meter).
+  std::vector<long long> sizes(plan.size(), -1);
+  long long total = 0;
+  bool totalKnown = true;
+  for (size_t i = 0; i < plan.size(); ++i)
+  {
+    if (mDownloadCancel.load(std::memory_order_acquire)) { SetStatus("download cancelled"); finish(); return; }
+    SetStatus("checking " + std::string(plan[i].what) + " (" + std::to_string(i + 1) + "/"
+              + std::to_string(plan.size()) + ")");
+    sizes[i] = gary::HttpContentLength(gary::HuggingFaceResolveUrl(plan[i].repo, plan[i].filename));
+    if (sizes[i] > 0) total += sizes[i];
+    else totalKnown = false;
+  }
+
+  long long completed = 0;   // bytes of fully-finished files (byte mode)
+  for (size_t i = 0; i < plan.size(); ++i)
+  {
+    if (mDownloadCancel.load(std::memory_order_acquire)) { SetStatus("download cancelled"); finish(); return; }
+
+    const std::string dest = (fs::path(destDir) / plan[i].filename).string();
+    const std::string url = gary::HuggingFaceResolveUrl(plan[i].repo, plan[i].filename);
+    const long long expected = sizes[i];
+    long long localSize = (long long)gary::FileSizeBytes(dest);
+
+    if (expected > 0 && localSize == expected)   // already complete — skip (matches models.sh)
+    {
+      completed += expected;
+      if (totalKnown && total > 0)
+        mDownloadProgress.store((float)((double)completed / (double)total), std::memory_order_release);
+      continue;
+    }
+    if (expected > 0 && localSize > expected)     // corrupt/oversized — restart this file fresh
+    {
+      std::remove(dest.c_str());
+      localSize = 0;
+    }
+
+    std::string spawnErr;
+    gary::AsyncProcess proc = gary::StartProcess(
+        {"curl", "-fL", "--retry", "3", "-C", "-", "-o", dest, url}, spawnErr);
+    if (!proc.valid)
+    {
+      SetStatus("download failed to start: " + spawnErr);
+      finish();
+      return;
+    }
+
+    int exitCode = 1;
+    for (;;)
+    {
+      const bool done = gary::ProcessTryWait(proc, &exitCode);
+      const long long now = (long long)gary::FileSizeBytes(dest);
+      if (totalKnown && total > 0)
+      {
+        const double frac = (double)(completed + now) / (double)total;
+        mDownloadProgress.store((float)std::min(1.0, std::max(0.0, frac)), std::memory_order_release);
+        char pct[8] = {};
+        std::snprintf(pct, sizeof pct, "%.0f%%", std::min(1.0, frac) * 100.0);
+        SetStatus("downloading " + std::string(plan[i].what) + " " + std::to_string(i + 1) + "/"
+                  + std::to_string(plan.size()) + " — " + pct);
+      }
+      else
+      {
+        mDownloadProgress.store((float)i / (float)plan.size(), std::memory_order_release);
+        SetStatus("downloading " + std::string(plan[i].what) + " " + std::to_string(i + 1) + "/"
+                  + std::to_string(plan.size()) + " — " + HumanBytes(now));
+      }
+
+      if (done)
+        break;
+      if (mDownloadCancel.load(std::memory_order_acquire))
+      {
+        gary::ProcessTerminate(proc);
+        gary::ProcessClose(proc);
+        SetStatus("download cancelled (partial files kept — resume any time)");
+        finish();
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    gary::ProcessClose(proc);
+
+    if (exitCode != 0)
+    {
+      SetStatus("download failed on " + std::string(plan[i].what) + " (curl exit "
+                + std::to_string(exitCode) + ") — click models to retry (resumes)");
+      finish();
+      return;
+    }
+    // Integrity guard: a size mismatch means a truncated/garbage file — better to fail loudly here than
+    // hand libsa3 a corrupt gguf. Delete it so the retry starts clean instead of resuming garbage.
+    if (expected > 0 && (long long)gary::FileSizeBytes(dest) != expected)
+    {
+      std::remove(dest.c_str());
+      SetStatus("download of " + std::string(plan[i].what) + " was incomplete — click models to retry");
+      finish();
+      return;
+    }
+    completed += (expected > 0) ? expected : (long long)gary::FileSizeBytes(dest);
+  }
+
+  // Validate + persist. UseModelsFolder tears down any stale context and flips ModelsPresent on.
+  std::vector<std::string> missing;
+  if (gary::ModelSetComplete(destDir, variant, "f16", missing))
+  {
+    UseModelsFolder(destDir, variant, /*persist=*/true);
+    mDownloadProgress.store(1.0f, std::memory_order_release);
+    SetStatus("models ready (" + variant + ") — you can generate now");
+  }
+  else
+  {
+    std::string msg = "download finished but the set looks incomplete: ";
+    for (size_t i = 0; i < missing.size(); ++i)
+      msg += (i ? ", " : "") + missing[i];
+    SetStatus(msg);
+  }
+  finish();
 }
 
 void SA3IPlug2Demo::SetStatus(const std::string& text)

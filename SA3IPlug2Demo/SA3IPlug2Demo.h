@@ -81,7 +81,24 @@ public:
   std::string StatusText() const;
   std::string SourceStatusText() const;
   std::string OutputStatusText() const;
-  std::string ModelsDir() const;
+
+  // --- Model management (v0.3.0): the models dir is persisted; generate is gated on the set being present.
+  std::string ModelsDir() const;             // persisted setting -> SA3_MODELS_DIR env -> compile default
+  std::string ModelVariant() const;          // "medium" | "small-music"
+  int ModelVariantIndex() const;             // 0 = medium, 1 = small-music
+  bool ModelsPresent() const noexcept { return mModelsPresent.load(std::memory_order_acquire); }
+  void RefreshModelsPresent();               // re-scan ModelsDir() for the current variant's file set
+  // Point the demo at a folder (from the "point at folder" picker or a finished download). Validates the
+  // set for `variant`, persists dir+variant, and tears down any loaded context so the next render reloads.
+  bool UseModelsFolder(const std::string& dir, const std::string& variant, bool persist);
+  // Switch the active generation variant (must already be present in the current models dir). Persists the
+  // choice and drops any loaded context so the next render loads the selected variant.
+  bool SelectVariant(const std::string& variant);
+  bool VariantAvailable(const std::string& variant) const;   // is that variant's file set in ModelsDir()?
+  void StartModelDownload(int variantIdx, const std::string& destDir);   // spawns the download worker
+  void CancelModelDownload();
+  bool Downloading() const noexcept { return mDownloading.load(std::memory_order_acquire); }
+  float DownloadProgress() const noexcept { return mDownloadProgress.load(std::memory_order_acquire); }
 
   void SetCurrentRenderMode(RenderMode mode);
   RenderMode CurrentRenderMode() const noexcept;
@@ -111,7 +128,11 @@ public:
   // A frozen init snapshot (myBuffer.wav) exists — set by dropping audio or "save buffer", persisted across
   // sessions. transform/continue use this snapshot as init audio and are disabled until it exists.
   bool HasInit() const noexcept { return mHasInit.load(std::memory_order_acquire); }
-  bool CanRender(RenderMode mode) const noexcept { return mode == RenderMode::Text || HasInit(); }
+  // Generation needs the model set present; transform/continue additionally need a frozen init snapshot.
+  bool CanRender(RenderMode mode) const noexcept
+  {
+    return ModelsPresent() && (mode == RenderMode::Text || HasInit());
+  }
 
   // Musical controls (appended to the prompt; loop drives an exact bar length in Text mode).
   double HostTempo() const noexcept { return mHostTempo.load(std::memory_order_acquire); }
@@ -172,6 +193,7 @@ private:
     double bpm = 0.0;       // host tempo captured at request time (0 = unknown)
     int loopBars = 0;       // 0 = off; 4/8/16 = generate an exact bar-length loop (Text mode only)
     int distShift = 0;      // 0=LogSNR,1=Flux,2=Full,3=None (libsa3 schedule warp)
+    std::string variant = "medium";   // model variant to load (medium | small-music)
     std::vector<std::vector<float>> sourceChannels;
     int sourceSamples = 0;
     int sourceSampleRate = 44100;
@@ -189,6 +211,9 @@ private:
   RenderInput CaptureRenderInput(RenderMode mode);
   void RenderWorkerMain(uint64_t requestId, RenderInput input);
   void StopWorker();
+  void DownloadWorkerMain(int variantIdx, std::string destDir);
+  void StopDownloadWorker();
+  void TeardownContext();   // free the loaded sa3_context (caller must ensure no render is running)
   void SetStatus(const std::string& text);
   void SetSourceStatus(const std::string& text);
   void SetOutputStatus(const std::string& text);
@@ -261,4 +286,17 @@ private:
   std::atomic<uint64_t> mRequestId{0};
   std::atomic<bool> mCancelRequested{false};
   sa3_context* mContext = nullptr;
+
+  // Model management state. mModelsDirSetting ("" = fall through to env/default) + mModelVariant are loaded
+  // from settings.txt in the ctor; guarded by mModelsMutex. mModelsPresent caches the file-set scan so Draw
+  // doesn't hit the filesystem every frame.
+  mutable std::mutex mModelsMutex;
+  std::string mModelsDirSetting;
+  std::string mModelVariant = "medium";
+  std::atomic<bool> mModelsPresent{false};
+
+  std::thread mDownloadWorker;
+  std::atomic<bool> mDownloading{false};
+  std::atomic<bool> mDownloadCancel{false};
+  std::atomic<float> mDownloadProgress{0.0f};
 };

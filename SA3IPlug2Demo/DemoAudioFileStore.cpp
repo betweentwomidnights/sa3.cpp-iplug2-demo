@@ -10,10 +10,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <sstream>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -26,6 +29,11 @@
 #else
   #include <cerrno>
   #include <sys/stat.h>
+  #include <sys/wait.h>
+  #include <unistd.h>
+  #include <signal.h>
+  #include <spawn.h>
+  extern char** environ;
 #endif
 
 namespace gary
@@ -1685,6 +1693,354 @@ uint64_t FileSizeBytes(const std::string& path)
 
   const std::streamoff size = in.tellg();
   return size > 0 ? static_cast<uint64_t>(size) : 0;
+}
+
+// =====================================================================================================
+// v0.3.0 in-plugin model management: settings, model plan/validation, and curl-based downloading.
+// =====================================================================================================
+
+namespace fs = std::filesystem;
+
+namespace
+{
+std::string SettingsPath()
+{
+  const std::string documents = DocumentsDirectory();
+  return documents.empty() ? std::string() : JoinPath(documents, "settings.txt");
+}
+
+std::string GlobOneInDir(const std::string& dir, const std::string& prefix, const std::string& suffix)
+{
+  std::error_code ec;
+  if (!fs::is_directory(dir, ec))
+    return {};
+  for (const auto& entry : fs::directory_iterator(dir, ec))
+  {
+    const std::string n = entry.path().filename().string();
+    if (n.size() >= prefix.size() + suffix.size()
+        && n.compare(0, prefix.size(), prefix) == 0
+        && n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0)
+      return entry.path().string();
+  }
+  return {};
+}
+
+bool VariantIsSmall(const std::string& variant)
+{
+  return variant == "small-music" || variant == "small-sfx";
+}
+
+#if defined(_WIN32)
+std::string QuoteWinArg(const std::string& arg)
+{
+  if (!arg.empty() && arg.find_first_of(" \t\"") == std::string::npos)
+    return arg;   // no quoting needed
+  std::string out = "\"";
+  size_t backslashes = 0;
+  for (char c : arg)
+  {
+    if (c == '\\')
+    {
+      ++backslashes;
+      out.push_back(c);
+    }
+    else if (c == '"')
+    {
+      out.append(backslashes + 1, '\\');   // escape the run of backslashes + the quote
+      out.push_back('"');
+      backslashes = 0;
+    }
+    else
+    {
+      backslashes = 0;
+      out.push_back(c);
+    }
+  }
+  out.append(backslashes, '\\');   // double trailing backslashes before the closing quote
+  out.push_back('"');
+  return out;
+}
+#endif
+} // namespace
+
+std::string LoadSetting(const std::string& key)
+{
+  const std::string path = SettingsPath();
+  if (path.empty())
+    return {};
+  std::ifstream in(path);
+  if (!in)
+    return {};
+  std::string line;
+  while (std::getline(in, line))
+  {
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos)
+      continue;
+    if (line.compare(0, eq, key) == 0)
+    {
+      std::string value = line.substr(eq + 1);
+      if (!value.empty() && value.back() == '\r')
+        value.pop_back();
+      return value;
+    }
+  }
+  return {};
+}
+
+bool SaveSetting(const std::string& key, const std::string& value)
+{
+  const std::string path = SettingsPath();
+  if (path.empty())
+    return false;
+
+  std::vector<std::pair<std::string, std::string>> entries;
+  bool replaced = false;
+  {
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line))
+    {
+      if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+      const size_t eq = line.find('=');
+      if (eq == std::string::npos)
+        continue;
+      const std::string k = line.substr(0, eq);
+      if (k == key)
+      {
+        entries.emplace_back(k, value);
+        replaced = true;
+      }
+      else
+      {
+        entries.emplace_back(k, line.substr(eq + 1));
+      }
+    }
+  }
+  if (!replaced)
+    entries.emplace_back(key, value);
+
+  std::ofstream out(path, std::ios::trunc);
+  if (!out)
+    return false;
+  for (const auto& e : entries)
+    out << e.first << '=' << e.second << '\n';
+  return static_cast<bool>(out);
+}
+
+std::string DefaultModelsDirectory(std::string* error)
+{
+  const std::string documents = DocumentsDirectory(error);
+  if (documents.empty())
+    return {};
+  const std::string models = JoinPath(documents, "models");
+  if (!EnsureDirectoryExists(models, error))
+    return {};
+  return models;
+}
+
+std::vector<ModelDownloadItem> ModelPlan(const std::string& variant, const std::string& encoding)
+{
+  const std::string ENC = (encoding == "f32" || encoding == "F32") ? "F32" : "F16";
+  const std::string ditSize = VariantIsSmall(variant) ? "0.5B" : "1.5B";
+  const std::string same = VariantIsSmall(variant) ? "same-s" : "same-l";
+  const std::string varRepo = "thepatch/stable-audio-3-" + variant + "-GGUF";
+  const std::string shared = "thepatch/t5gemma-b-b-ul2-GGUF";
+  const std::string base = "stable-audio-3-" + variant;
+
+  std::vector<ModelDownloadItem> items;
+  items.push_back({varRepo, base + "-dit-" + ditSize + "-v1.0-" + ENC + ".gguf",
+                   "stable-audio-3-" + variant + "-dit-", "-" + ENC + ".gguf", "DiT"});
+  items.push_back({varRepo, base + "-" + same + "-v1.0-" + ENC + ".gguf",
+                   "stable-audio-3-" + variant + "-same-", "-" + ENC + ".gguf", "SAME"});
+  items.push_back({varRepo, base + "-conditioner-v1.0-F32.gguf",
+                   "stable-audio-3-" + variant + "-conditioner-", ".gguf", "conditioner"});
+  items.push_back({shared, "t5gemma-b-b-ul2-encoder-0.3B-v1.0-F32.gguf",
+                   "t5gemma-b-b-ul2-encoder-", ".gguf", "encoder"});
+  items.push_back({shared, "t5gemma-b-b-ul2-v1.0-vocab.gguf",
+                   "t5gemma-b-b-ul2-v1.0-vocab", ".gguf", "tokenizer"});
+  return items;
+}
+
+bool ModelSetComplete(const std::string& dir, const std::string& variant, const std::string& encoding,
+                      std::vector<std::string>& missing)
+{
+  missing.clear();
+  if (dir.empty())
+  {
+    missing.push_back("all");
+    return false;
+  }
+  for (const auto& item : ModelPlan(variant, encoding))
+    if (GlobOneInDir(dir, item.globPrefix, item.globSuffix).empty())
+      missing.push_back(item.what);
+  return missing.empty();
+}
+
+std::string HuggingFaceResolveUrl(const std::string& repo, const std::string& filename)
+{
+  return "https://huggingface.co/" + repo + "/resolve/main/" + filename;
+}
+
+AsyncProcess StartProcess(const std::vector<std::string>& argv, std::string& error)
+{
+  AsyncProcess proc;
+  if (argv.empty())
+  {
+    error = "empty command";
+    return proc;
+  }
+#if defined(_WIN32)
+  std::string cmdLine;
+  for (size_t i = 0; i < argv.size(); ++i)
+  {
+    if (i)
+      cmdLine.push_back(' ');
+    cmdLine += QuoteWinArg(argv[i]);
+  }
+  STARTUPINFOA startup = {};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESHOWWINDOW;
+  startup.wShowWindow = SW_HIDE;
+  PROCESS_INFORMATION info = {};
+  std::vector<char> mutableCmd(cmdLine.begin(), cmdLine.end());
+  mutableCmd.push_back('\0');
+  const BOOL ok = CreateProcessA(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
+                                 CREATE_NO_WINDOW, nullptr, nullptr, &startup, &info);
+  if (!ok)
+  {
+    error = "failed to launch process, win32 error " + std::to_string(GetLastError());
+    return proc;
+  }
+  CloseHandle(info.hThread);
+  proc.native = reinterpret_cast<void*>(info.hProcess);
+  proc.valid = true;
+  return proc;
+#else
+  std::vector<char*> cargv;
+  cargv.reserve(argv.size() + 1);
+  for (const auto& a : argv)
+    cargv.push_back(const_cast<char*>(a.c_str()));
+  cargv.push_back(nullptr);
+  pid_t pid = 0;
+  const int rc = posix_spawnp(&pid, cargv[0], nullptr, nullptr, cargv.data(), environ);
+  if (rc != 0)
+  {
+    error = std::string("failed to launch process: ") + std::strerror(rc);
+    return proc;
+  }
+  proc.native = reinterpret_cast<void*>(static_cast<intptr_t>(pid) + 1);
+  proc.valid = true;
+  return proc;
+#endif
+}
+
+bool ProcessTryWait(AsyncProcess& proc, int* exitCode)
+{
+  if (!proc.valid)
+  {
+    if (exitCode)
+      *exitCode = -1;
+    return true;
+  }
+#if defined(_WIN32)
+  HANDLE handle = reinterpret_cast<HANDLE>(proc.native);
+  const DWORD wait = WaitForSingleObject(handle, 0);
+  if (wait != WAIT_OBJECT_0)
+    return false;
+  DWORD code = 1;
+  GetExitCodeProcess(handle, &code);
+  if (exitCode)
+    *exitCode = static_cast<int>(code);
+  return true;
+#else
+  pid_t pid = static_cast<pid_t>(reinterpret_cast<intptr_t>(proc.native) - 1);
+  int status = 0;
+  const pid_t r = waitpid(pid, &status, WNOHANG);
+  if (r == 0)
+    return false;
+  if (exitCode)
+    *exitCode = (r > 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : 1;
+  return true;
+#endif
+}
+
+void ProcessTerminate(AsyncProcess& proc)
+{
+  if (!proc.valid)
+    return;
+#if defined(_WIN32)
+  TerminateProcess(reinterpret_cast<HANDLE>(proc.native), 1);
+#else
+  pid_t pid = static_cast<pid_t>(reinterpret_cast<intptr_t>(proc.native) - 1);
+  kill(pid, SIGTERM);
+#endif
+}
+
+void ProcessClose(AsyncProcess& proc)
+{
+  if (!proc.valid)
+    return;
+#if defined(_WIN32)
+  CloseHandle(reinterpret_cast<HANDLE>(proc.native));
+#else
+  pid_t pid = static_cast<pid_t>(reinterpret_cast<intptr_t>(proc.native) - 1);
+  int status = 0;
+  waitpid(pid, &status, 0);   // reap so it doesn't linger as a zombie
+#endif
+  proc.native = nullptr;
+  proc.valid = false;
+}
+
+long long HttpContentLength(const std::string& url)
+{
+  std::error_code ec;
+  const fs::path tmp = fs::temp_directory_path(ec)
+                     / ("sa3dl_head_" + std::to_string(std::hash<std::string>{}(url)) + ".txt");
+  const std::string tmpPath = tmp.string();
+
+  std::string error;
+  AsyncProcess proc = StartProcess({"curl", "-sIL", "-o", tmpPath, url}, error);
+  if (!proc.valid)
+    return -1;
+  int code = 1;
+  while (!ProcessTryWait(proc, &code))
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+  ProcessClose(proc);
+  if (code != 0)
+  {
+    std::remove(tmpPath.c_str());
+    return -1;
+  }
+
+  long long contentLength = -1;
+  {
+    std::ifstream in(tmpPath, std::ios::binary);
+    std::string line;
+    while (std::getline(in, line))
+    {
+      std::string lower = line;
+      std::transform(lower.begin(), lower.end(), lower.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      const std::string tag = "content-length:";
+      if (lower.compare(0, tag.size(), tag) == 0)
+      {
+        std::string digits;
+        for (char c : line.substr(tag.size()))
+          if (std::isdigit(static_cast<unsigned char>(c)))
+            digits.push_back(c);
+        if (!digits.empty())
+        {
+          const long long v = std::strtoll(digits.c_str(), nullptr, 10);
+          if (v > 0)
+            contentLength = v;   // keep the LAST positive value (final hop after -L redirects)
+        }
+      }
+    }
+  }
+  std::remove(tmpPath.c_str());
+  return contentLength;
 }
 
 } // namespace gary

@@ -1,7 +1,8 @@
-# sa3 medium embedded in iPlug2 as c++
+# stable-audio-3 medium + small-music embedded in iPlug2 as c++
 
 this is just an example vst for exploring and validating **libsa3** from
 [sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp).
+it can run either the stable-audio-3 **medium** or **small-music** GGUF model variant in-process.
 
 i don't rly expect to maintain this project much, because we may end up rolling it into an iPlug2 version of
 [gary4juce](https://github.com/betweentwomidnights/gary4juce) (aka gary-in-the-plug).
@@ -29,6 +30,7 @@ It reuses some UI concepts and audio-file handling from [gary4juce](https://gith
 - `transform` uses the source audio plus the transform-only init-noise slider.
 - `continue` uses the source audio as inpaint context and treats the duration slider as the desired total length.
 - Shared controls: duration/steps sliders; a seed field (`random`, or lock a seed to reproduce a render); a `shift` dropdown for the sampler distribution shift (`LogSNR`/`Flux`/`Full`/`None`, exposed through `libsa3`); and `bpm` + `key`/scale that get appended to the prompt. BPM follows the host tempo in a DAW and is drag-adjustable in the standalone.
+- The `models` menu can download `medium` or `small-music`, point at an existing model folder, and switch the active variant when both complete model sets are present.
 - LoRAs can be imported and blended (see below).
 - The source waveform lives above the render controls with a `save buffer` button; generated output lives below with play/stop + drag-out. Output auto-saves to `myOutput.wav` after each render, so there's no manual output-save button.
 - The editor uses a tall `420x944` layout so it can sit beside a DAW timeline without consuming as much horizontal space.
@@ -116,7 +118,9 @@ cmake --build build --config Release
 open build/out/SA3IPlug2Demo.app
 ```
 
-Set `SA3_MODELS_DIR` at runtime to override the default model directory.
+Set `SA3_MODELS_DIR` at runtime to override the fallback model directory. The in-plugin `models` button can
+also download the `medium` or `small-music` GGUF file set into `Documents/sa3-iplug2-demo/models`, point at an
+existing folder, and persist that folder plus the selected variant.
 
 ## builds & releases
 
@@ -133,6 +137,9 @@ works, but i can't cleanly A/B it against cuda yet: **the same seed produces a d
 backend** (the tensor-core matmuls accumulate differently — see sa3.cpp's cross-backend note). so if something sounds
 off (e.g. a silence gap), it's genuinely hard to tell whether it's the backend or just the model doing its thing.
 bug reports very welcome.
+
+as of `0.3.0`, the same plugin build supports both stable-audio-3 `medium` and `small-music`. the backend zip
+only decides which compute backend gets bundled; the model picker/downloader decides which SA3 variant is active.
 
 ## Backend notes
 
@@ -162,7 +169,7 @@ Copy-Item -LiteralPath .\build\out\SA3IPlug2Demo.vst3 -Destination $userVst3 -Re
 The current validated metadata is:
 
 - vendor: `the collabage patch`
-- version: `0.2.0`
+- version: `0.3.0`
 - VST3 validator: `47 tests passed, 0 tests failed`
 
 ## Playback crackle triage
