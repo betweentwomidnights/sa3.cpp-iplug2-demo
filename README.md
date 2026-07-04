@@ -1,4 +1,4 @@
-# stable-audio-3 medium + small-music embedded in iPlug2 as c++
+# stable-audio-3 embedded in iPlug2 as c++
 
 this is just an example vst for exploring and validating **libsa3** from
 [sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp).
