@@ -65,25 +65,62 @@ Dropped source audio is decoded from WAV/MP3 and converted to the current host r
 
 ## Build
 
-### 1. Get the sources (iPlug2 is a submodule)
+The easiest path is to clone this demo and `sa3.cpp` as sibling folders. The demo's CMake defaults look for
+`../sa3.cpp`, and then prefer `../sa3.cpp/build-cuda` when it exists. The commands below use `C:\dev` on
+Windows and `~/dev` on macOS; any parent folder is fine as long as the two repos stay side by side.
+
+### 1. Get the sources
 
 iPlug2 is vendored as a git submodule at `vendor/iPlug2`, pinned to a small fork of the official repo
 (`betweentwomidnights/iPlug2` @ `sa3-demo-tempo`) that adds one required VST3 change — it requests the host
 tempo/transport/music-time process context so `GetTempo()` works inside a DAW (needed for the BPM/loop features).
 
 ```powershell
-git clone --recurse-submodules <this-repo-url>
-# or, if already cloned:  git submodule update --init --recursive
+New-Item -ItemType Directory -Force C:\dev | Out-Null
+cd C:\dev
+git clone --recurse-submodules https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo.git
+git clone --recurse-submodules https://github.com/betweentwomidnights/sa3.cpp.git
+```
+
+If you already cloned this demo without submodules:
+
+```powershell
+cd C:\dev\sa3.cpp-iplug2-demo
+git submodule update --init --recursive
 ```
 
 Then fetch iPlug2's SDK dependencies (VST3 SDK, NanoVG, etc.) — these are downloaded artifacts, not in git.
 Run the standard iPlug2 downloader from **git-bash** (Windows has no `.ps1` variant):
 
 ```bash
+cd /c/dev/sa3.cpp-iplug2-demo
 cd vendor/iPlug2/Dependencies/IPlug && ./download-iplug-sdks.sh
 ```
 
-### 2. Point at sa3.cpp
+### 2. Build sa3.cpp
+
+Build `libsa3` first. On Windows, the default release build for this demo is CUDA:
+
+```cmd
+cd C:\dev\sa3.cpp
+build.cmd cuda
+```
+
+For a Vulkan build instead:
+
+```cmd
+cd C:\dev\sa3.cpp
+build.cmd vulkan
+```
+
+Model files are not required to compile the plugin. The plugin's `models` button can download `medium` or
+`small-music` later, but you can also prefill `C:\dev\sa3.cpp\models` with the `sa3.cpp` downloader:
+
+```cmd
+cd C:\dev\sa3.cpp
+models.cmd --variant medium
+models.cmd --variant small-music
+```
 
 The default CMake cache expects:
 
@@ -91,28 +128,41 @@ The default CMake cache expects:
 - a Release `sa3.cpp` build. It prefers `<sa3.cpp>/build-cuda` when present, then falls back to `<sa3.cpp>/build`.
 - CUDA runtime DLLs under `%CUDA_PATH%/bin` when using the CUDA `sa3.cpp` build.
 
-`IPLUG2_DIR` now defaults to the bundled `vendor/iPlug2` submodule; override it only if you want a different iPlug2 checkout.
+`IPLUG2_DIR` defaults to the bundled `vendor/iPlug2` submodule; override it only if you want a different iPlug2 checkout.
 
-### 3. Configure and build with Visual Studio:
+### 3. Configure and build this demo
 
-Run from the repo root:
+Run from the demo repo root:
 
 ```powershell
+cd C:\dev\sa3.cpp-iplug2-demo
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
+cmake --build build --config Release --target SA3IPlug2Demo-vst3
 ```
 
-To force a specific `libsa3` build:
+If `sa3.cpp` is not a sibling checkout, pass both paths explicitly:
 
 ```powershell
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSA3_BUILD_DIR=<sa3.cpp>\build-cuda
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSA3_CPP_DIR=C:\path\to\sa3.cpp -DSA3_BUILD_DIR=C:\path\to\sa3.cpp\build-cuda
+```
+
+For a Vulkan plugin bundle, point at the Vulkan `sa3.cpp` build:
+
+```powershell
+cmake -S . -B build-vulkan -G "Visual Studio 17 2022" -A x64 -DSA3_BUILD_DIR=C:\dev\sa3.cpp\build-vulkan
+cmake --build build-vulkan --config Release --target SA3IPlug2Demo-vst3
 ```
 
 On macOS/Apple Silicon, build `sa3.cpp` with Metal first, then point this demo at that build:
 
 ```bash
-cd ../sa3.cpp && ./build.sh metal
-cd ../sa3.cpp-iplug2-demo
+mkdir -p ~/dev
+cd ~/dev
+git clone --recurse-submodules https://github.com/betweentwomidnights/sa3.cpp-iplug2-demo.git
+git clone --recurse-submodules https://github.com/betweentwomidnights/sa3.cpp.git
+cd sa3.cpp-iplug2-demo/vendor/iPlug2/Dependencies/IPlug && ./download-iplug-sdks.sh
+cd ~/dev/sa3.cpp && ./build.sh metal
+cd ~/dev/sa3.cpp-iplug2-demo
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSA3_BUILD_DIR=../sa3.cpp/build-metal
 cmake --build build --config Release
 open build/out/SA3IPlug2Demo.app
@@ -177,3 +227,9 @@ The current validated metadata is:
 Render work runs on a worker thread, not directly in the audio callback. Output audition playback uses a host-rate buffer protected separately from the native output buffer, so waveform redraws and output save/drag work should not block playback as easily.
 
 If standalone playback still crackles on a machine, first test a larger standalone audio buffer or a different ASIO/WASAPI driver. The remaining likely causes are driver/device contention during local testing or GPU/CPU contention while a render is actively running, not the DAW drag/export sample-rate path.
+
+## Credits / upstreams
+
+- This demo embeds `libsa3` from [sa3.cpp](https://github.com/betweentwomidnights/sa3.cpp).
+- The plugin is built with iPlug2. This repo vendors a small fork for the demo, and the official upstream is [iPlug2/iPlug2](https://github.com/iPlug2/iPlug2).
+- Stable Audio 3 is from Stability AI; the official repository is [Stability-AI/stable-audio-3](https://github.com/Stability-AI/stable-audio-3).
