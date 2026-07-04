@@ -13,6 +13,9 @@
 #include <windows.h>
 #include <commdlg.h>
 #endif
+#ifdef __APPLE__
+#include <dlfcn.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -118,6 +121,8 @@ struct Sa3Api
 
 #ifdef _WIN32
   HMODULE module = nullptr;
+#elif defined(__APPLE__)
+  void* module = nullptr;
 #endif
   InitFn init = nullptr;
   GenerateExFn generateEx = nullptr;
@@ -127,6 +132,8 @@ struct Sa3Api
   bool Ready() const noexcept
   {
 #ifdef _WIN32
+    return module && init && generateEx && freeAudio && freeContext;
+#elif defined(__APPLE__)
     return module && init && generateEx && freeAudio && freeContext;
 #else
     return false;
@@ -160,8 +167,31 @@ struct Sa3Api
     }
 
     return true;
+#elif defined(__APPLE__)
+    const std::string dir = ModuleDirectory(error);
+    if (dir.empty())
+      return false;
+
+    const std::string dylibPath = dir + "/libsa3.dylib";
+    module = dlopen(dylibPath.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!module)
+    {
+      const char* detail = dlerror();
+      error = "dlopen failed for " + dylibPath + (detail ? std::string(": ") + detail : std::string());
+      return false;
+    }
+
+    if (!Resolve(init, "sa3_init", error) ||
+        !Resolve(generateEx, "sa3_generate_ex", error) ||
+        !Resolve(freeAudio, "sa3_free_audio", error) ||
+        !Resolve(freeContext, "sa3_free", error))
+    {
+      return false;
+    }
+
+    return true;
 #else
-    error = "runtime libsa3 loading is only implemented for Windows in this demo";
+    error = "runtime libsa3 loading is only implemented for Windows/macOS in this demo";
     return false;
 #endif
   }
@@ -221,6 +251,40 @@ private:
     if (!proc)
     {
       error = std::string("GetProcAddress failed for ") + name + " (win32 " + std::to_string(GetLastError()) + ")";
+      return false;
+    }
+    fn = reinterpret_cast<Fn>(proc);
+    return true;
+  }
+#elif defined(__APPLE__)
+  static std::string ModuleDirectory(std::string& error)
+  {
+    Dl_info info = {};
+    if (dladdr(reinterpret_cast<const void*>(&ModuleDirectory), &info) == 0 || !info.dli_fname)
+    {
+      error = "dladdr failed while resolving module directory";
+      return {};
+    }
+
+    std::string path(info.dli_fname);
+    const size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos)
+    {
+      error = "could not derive module directory from " + path;
+      return {};
+    }
+    return path.substr(0, slash);
+  }
+
+  template <typename Fn>
+  bool Resolve(Fn& fn, const char* name, std::string& error)
+  {
+    dlerror();
+    void* proc = dlsym(module, name);
+    if (!proc)
+    {
+      const char* detail = dlerror();
+      error = std::string("dlsym failed for ") + name + (detail ? std::string(": ") + detail : std::string());
       return false;
     }
     fn = reinterpret_cast<Fn>(proc);

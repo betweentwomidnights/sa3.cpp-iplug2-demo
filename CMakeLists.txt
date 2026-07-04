@@ -31,6 +31,13 @@ file(GLOB SA3_RUNTIME_DLLS
   "${SA3_BUILD_DIR}/bin/Release/sa3.dll"
   "${SA3_BUILD_DIR}/bin/Release/ggml*.dll"
 )
+if(APPLE)
+  file(GLOB_RECURSE SA3_RUNTIME_DYLIBS
+    "${SA3_BUILD_DIR}/libsa3*.dylib"
+    "${SA3_BUILD_DIR}/ggml/src/libggml*.dylib"
+    "${SA3_BUILD_DIR}/ggml/src/ggml-*/*.dylib"
+  )
+endif()
 # Only bundle the CUDA runtime when the selected sa3 build actually uses the CUDA backend
 # (a Vulkan / Metal / CPU build ships no cudart/cublas). Detected by the presence of ggml-cuda.dll.
 if(EXISTS "${SA3_BUILD_DIR}/bin/Release/ggml-cuda.dll")
@@ -41,6 +48,7 @@ if(EXISTS "${SA3_BUILD_DIR}/bin/Release/ggml-cuda.dll")
   )
   list(APPEND SA3_RUNTIME_DLLS ${SA3_CUDA_RUNTIME_DLLS})
 endif()
-list(REMOVE_DUPLICATES SA3_RUNTIME_DLLS)
+set(SA3_RUNTIME_LIBS ${SA3_RUNTIME_DLLS} ${SA3_RUNTIME_DYLIBS})
+list(REMOVE_DUPLICATES SA3_RUNTIME_LIBS)
 
 add_subdirectory(SA3IPlug2Demo)

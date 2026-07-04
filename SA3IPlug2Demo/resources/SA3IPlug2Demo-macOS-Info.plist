@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>SA3IPlug2Demo</string>
+	<key>CFBundleGetInfoString</key>
+	<string>SA3IPlug2Demo v0.2.0 Copyright 2026 The Collabage Patch</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.thecollabagepatch.app.SA3IPlug2Demo</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>SA3IPlug2Demo</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleSignature</key>
+	<string>S3id</string>
+	<key>CFBundleVersion</key>
+	<string>0.2.0</string>
+	<key>CSResourcesFileMapped</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>10.13.0</string>
+	<key>NSMainNibFile</key>
+	<string>SA3IPlug2Demo-macOS-MainMenu</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>This app needs mic access to capture and transform audio.</string>
+	<key>NSPrincipalClass</key>
+	<string>SWELLApplication</string>
+</dict>
+</plist>
