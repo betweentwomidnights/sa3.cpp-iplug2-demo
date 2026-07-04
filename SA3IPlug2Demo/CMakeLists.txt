@@ -31,10 +31,10 @@ iplug_add_plugin(${PROJECT_NAME}
 )
 
 function(sa3_demo_copy_runtime target_name)
-  if(TARGET ${target_name} AND SA3_RUNTIME_DLLS)
+  if(TARGET ${target_name} AND SA3_RUNTIME_LIBS)
     add_custom_command(TARGET ${target_name} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SA3_RUNTIME_DLLS} "$<TARGET_FILE_DIR:${target_name}>"
-      COMMENT "Copying sa3/ggml runtime DLLs for ${target_name}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SA3_RUNTIME_LIBS} "$<TARGET_FILE_DIR:${target_name}>"
+      COMMENT "Copying sa3/ggml runtime libraries for ${target_name}"
     )
   endif()
 endfunction()

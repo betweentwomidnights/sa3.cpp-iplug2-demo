@@ -106,6 +106,16 @@ To force a specific `libsa3` build:
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DSA3_BUILD_DIR=<sa3.cpp>\build-cuda
 ```
 
+On macOS/Apple Silicon, build `sa3.cpp` with Metal first, then point this demo at that build:
+
+```bash
+cd ../sa3.cpp && ./build.sh metal
+cd ../sa3.cpp-iplug2-demo
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSA3_BUILD_DIR=../sa3.cpp/build-metal
+cmake --build build --config Release
+open build/out/SA3IPlug2Demo.app
+```
+
 Set `SA3_MODELS_DIR` at runtime to override the default model directory.
 
 ## builds & releases
@@ -138,7 +148,7 @@ The demo runs renders in frugal/early-free mode (`keep_models = 0`) so long text
 
 On Windows, `SA3IPlug2Demo.vst3` is a bundle directory. It is normal for it to appear as a folder in a file browser; hosts load it from their plug-in browser after scanning.
 
-The VST3/app binaries load `sa3.dll` at render time from beside the binary instead of importing it at module load. This keeps strict host scanners from rejecting the plug-in before the bundled `sa3.dll`, `ggml*.dll`, and CUDA runtime DLLs can be found.
+The VST3/app binaries load `sa3.dll` / `libsa3.dylib` at render time from beside the binary instead of importing it at module load. This keeps strict host scanners from rejecting the plug-in before the bundled `sa3.dll`, `ggml*.dll`, CUDA runtime DLLs, or macOS `libggml*.dylib` files can be found.
 
 For Ableton testing without admin rights, either scan the repo's `build\out` as a VST3 custom folder or copy the bundle to `%LOCALAPPDATA%\Programs\Common\VST3`. Do not point Ableton's VST2 custom folder at the repo/build root, because it will try to scan every helper DLL as a VST2 plug-in.
 
