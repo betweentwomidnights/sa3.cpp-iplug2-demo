@@ -348,6 +348,7 @@ class SA3DemoControl final : public IControl
     Prompt,
     Dice,
     Models,
+    StatusCopy,
     Settings,
     SettingsClose,
     DecoderToggle,
@@ -434,6 +435,8 @@ public:
 
     const float left = shell.L + 18.f;
     const float right = shell.R - 18.f;
+    mStatusRect = {};
+    mStatusCopyRect = {};
     float y = shell.T + 14.f;
     const SA3IPlug2Demo::RenderMode mode = mPlugin.CurrentRenderMode();
 
@@ -466,12 +469,19 @@ public:
     const bool downloading = mPlugin.Downloading();
     const float progress = std::clamp(downloading ? mPlugin.DownloadProgress() : mPlugin.Progress(), 0.f, 1.f);
     const IRECT statusRect(left, y, right, y + 22.f);
+    mStatusRect = statusRect;
+    mStatusCopyRect = IRECT(statusRect.R - 24.f, statusRect.T, statusRect.R, statusRect.B);
     g.FillRoundRect(PanelDark(), statusRect, 3.f);
     if (mPlugin.Busy() || downloading)
       g.FillRoundRect(RedDim(), IRECT(statusRect.L, statusRect.T, statusRect.L + statusRect.W() * progress, statusRect.B), 3.f);
     g.DrawRoundRect(FrameSoft(), statusRect, 3.f);
+    const std::string status = mPlugin.StatusText();
+    const IRECT statusTextRect(statusRect.L + 8.f, statusRect.T, mStatusCopyRect.L - 5.f, statusRect.B);
     g.DrawText(IText(12.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(mPlugin.StatusText(), FitChars(statusRect.W() - 16.f, 6.5f, 18, 96)).c_str(), statusRect.GetPadded(-8.f));
+               CompactText(status, FitChars(statusTextRect.W(), 6.5f, 18, 96)).c_str(), statusTextRect);
+    DrawCopyIcon(g, mStatusCopyRect.GetPadded(-4.f),
+                 std::chrono::steady_clock::now() < mCopyFlashUntil ? Green()
+                 : mCopyHovered ? COLOR_WHITE : TextDim());
     y += 30.f;
 
     const IRECT sourceRect(left, y, right, y + 148.f);
@@ -504,6 +514,8 @@ public:
     const float outputHeight = std::min(190.f, std::max(150.f, shell.B - y - 14.f));
     const IRECT outputRect(left, y, right, y + outputHeight);
     DrawOutputPanel(g, outputRect);
+    if (mStatusHovered)
+      DrawStatusTooltip(g, status);
   }
 
   void OnMouseDown(float x, float y, const IMouseMod& mod) override
@@ -536,6 +548,7 @@ public:
       }
       case Hit::Dice:          mPlugin.RollPromptForCurrentMode(); SetDirty(false); return;
       case Hit::Models:        OpenModelsMenu(); return;
+      case Hit::StatusCopy:    CopyStatusToClipboard(); return;
       case Hit::Settings:
       case Hit::SettingsClose: mSettingsOpen = !mSettingsOpen; SetDirty(false); return;
       case Hit::DecoderToggle: mPlugin.SetDecoderLoraEnabled(!mPlugin.DecoderLoraEnabled()); SetDirty(false); return;
@@ -670,6 +683,28 @@ public:
     IControl::OnMouseUp(x, y, mod);
   }
 
+  void OnMouseOver(float x, float y, const IMouseMod& mod) override
+  {
+    const bool statusHovered = mStatusRect.Contains(x, y);
+    const bool copyHovered = mStatusCopyRect.Contains(x, y);
+    if (statusHovered != mStatusHovered || copyHovered != mCopyHovered)
+    {
+      mStatusHovered = statusHovered;
+      mCopyHovered = copyHovered;
+      SetTooltip(statusHovered ? mPlugin.StatusText().c_str() : "Embedded libsa3 test surface");
+      SetDirty(false);
+    }
+    IControl::OnMouseOver(x, y, mod);
+  }
+
+  void OnMouseOut() override
+  {
+    mStatusHovered = false;
+    mCopyHovered = false;
+    SetTooltip("Embedded libsa3 test surface");
+    IControl::OnMouseOut();
+  }
+
   void OnDrop(const char* str) override
   {
     mPlugin.LoadDroppedAudioFile(str);
@@ -769,6 +804,7 @@ private:
     }
     if (mDiceRect.Contains(x, y)) return {Hit::Dice, 0};
     if (mModelsBtnRect.Contains(x, y)) return {Hit::Models, 0};
+    if (mStatusCopyRect.Contains(x, y)) return {Hit::StatusCopy, 0};
     if (mPromptRect.Contains(x, y)) return {Hit::Prompt, 0};
     if (mGenerateTabRect.Contains(x, y)) return {Hit::TabGenerate, 0};
     if (mTransformTabRect.Contains(x, y)) return {Hit::TabTransform, 0};
@@ -799,6 +835,40 @@ private:
     if (mOutputPlayRect.Contains(x, y)) return {Hit::OutputPlay, 0};
     if (mOutputStopRect.Contains(x, y)) return {Hit::OutputStop, 0};
     return {};
+  }
+
+  void DrawCopyIcon(IGraphics& g, const IRECT& bounds, const IColor& color)
+  {
+    const float w = std::max(7.f, bounds.W() * 0.58f);
+    const float h = std::max(8.f, bounds.H() * 0.68f);
+    const IRECT back(bounds.L + 1.f, bounds.T + 1.f, bounds.L + 1.f + w, bounds.T + 1.f + h);
+    const IRECT front(bounds.R - w - 1.f, bounds.B - h - 1.f, bounds.R - 1.f, bounds.B - 1.f);
+    g.DrawRoundRect(color, back, 1.5f, nullptr, 1.2f);
+    g.FillRoundRect(gary::ui::PanelDark(), front, 1.5f);
+    g.DrawRoundRect(color, front, 1.5f, nullptr, 1.2f);
+  }
+
+  void DrawStatusTooltip(IGraphics& g, const std::string& status)
+  {
+    if (status.empty() || mStatusRect.Empty()) return;
+    using namespace gary::ui;
+    const float approxLines = std::ceil((float)status.size() / 48.f);
+    const float height = std::clamp(22.f + approxLines * 15.f, 50.f, 230.f);
+    const IRECT tip(mStatusRect.L, mStatusRect.B + 5.f, mStatusRect.R,
+                    std::min(mRECT.B - 18.f, mStatusRect.B + 5.f + height));
+    g.FillRoundRect(IColor(250, 12, 12, 12), tip, 4.f);
+    g.DrawRoundRect(Red(), tip, 4.f, nullptr, 1.2f);
+    g.DrawMultiLineText(IText(11.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Top),
+                        status.c_str(), tip.GetPadded(-9.f));
+  }
+
+  void CopyStatusToClipboard()
+  {
+    if (!GetUI()) return;
+    const std::string status = mPlugin.StatusText();
+    if (!status.empty() && GetUI()->SetTextInClipboard(status.c_str()))
+      mCopyFlashUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
+    SetDirty(false);
   }
 
   void DrawTab(IGraphics& g, const IRECT& bounds, const char* label, bool active)
@@ -1477,6 +1547,7 @@ private:
   SA3IPlug2Demo& mPlugin;
   IRECT mPromptRect;
   IRECT mDiceRect;
+  IRECT mStatusRect, mStatusCopyRect;
   IRECT mModelsBtnRect, mSettingsBtnRect, mSettingsCloseRect;
   IRECT mDecoderToggleRect, mDecoderDownloadRect, mDecoderChooseRect, mDecoderClearRect;
   IRECT mNormalizeToggleRect, mLimiterToggleRect;
@@ -1509,6 +1580,9 @@ private:
   float mOutputDragStartX = 0.f;
   float mOutputDragStartY = 0.f;
   bool mSettingsOpen = false;
+  bool mStatusHovered = false;
+  bool mCopyHovered = false;
+  std::chrono::steady_clock::time_point mCopyFlashUntil{};
 };
 } // namespace
 

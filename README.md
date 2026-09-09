@@ -33,6 +33,7 @@ It reuses some UI concepts and audio-file handling from [gary4juce](https://gith
 - The `models` menu can download `medium` or `small-music`, point at an existing model folder, and switch the active variant when both complete model sets are present.
 - LoRAs can be imported and blended (see below).
 - A compact `settings` screen manages the published SAME-L decoder-correction LoRA separately from creative LoRAs, plus peak-normalize and soft-limiter controls. The decoder adapter is remembered but never sent to SAME-S.
+- The status row reserves a small copy icon at the right; hovering the row shows the complete, untruncated status or error and the icon copies that full text to the clipboard.
 - The source waveform lives above the render controls with a `save buffer` button; generated output lives below with play/stop + drag-out. Output auto-saves to `myOutput.wav` after each render, so there's no manual output-save button.
 - The editor uses a tall `420x976` layout so it can sit beside a DAW timeline without consuming as much horizontal space.
 
