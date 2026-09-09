@@ -98,6 +98,7 @@ public:
   void StartModelDownload(int variantIdx, const std::string& destDir);   // spawns the download worker
   void CancelModelDownload();
   bool Downloading() const noexcept { return mDownloading.load(std::memory_order_acquire); }
+  bool DecoderLoraDownloading() const noexcept { return mDownloadKind.load(std::memory_order_acquire) == 2; }
   float DownloadProgress() const noexcept { return mDownloadProgress.load(std::memory_order_acquire); }
 
   void SetCurrentRenderMode(RenderMode mode);
@@ -168,6 +169,31 @@ public:
   void SetLoraStrength(size_t index, float strength);
   void SetLoraEnabled(size_t index, bool enabled);
   std::vector<LoraSlot> Loras() const;
+
+  // Decoder correction lives in Settings rather than the creative LoRA list. The currently published
+  // adapter targets SAME-L, so it is remembered but not submitted while a SAME-S variant is active.
+  bool DecoderLoraEnabled() const noexcept { return mDecoderLoraEnabled.load(std::memory_order_acquire); }
+  void SetDecoderLoraEnabled(bool enabled);
+  bool DecoderLoraInstalled() const;
+  bool DecoderLoraActive() const;
+  std::string DecoderLoraPath() const;
+  std::string DecoderLoraDisplayName() const;
+  void StartDecoderLoraDownload();
+  bool ImportDecoderLoraFromDialog();
+  void ClearDecoderLoraSelection();
+
+  bool PeakNormalizeEnabled() const noexcept { return mPeakNormalizeEnabled.load(std::memory_order_acquire); }
+  float PeakNormalizeDb() const noexcept { return mPeakNormalizeDb.load(std::memory_order_acquire); }
+  bool LimiterEnabled() const noexcept { return mLimiterEnabled.load(std::memory_order_acquire); }
+  float LimiterCeilingDb() const noexcept { return mLimiterCeilingDb.load(std::memory_order_acquire); }
+  float LimiterKnee() const noexcept { return mLimiterKnee.load(std::memory_order_acquire); }
+  void SetPeakNormalizeEnabled(bool enabled);
+  void SetPeakNormalizeDb(float db);
+  void SetLimiterEnabled(bool enabled);
+  void SetLimiterCeilingDb(float db);
+  void SetLimiterKnee(float knee);
+  void ResetOutputProcessing();
+  void SetRawOutputProcessing();
   void ToggleOutputPlayback();
   void StopOutputPlayback();
   void SeekOutputPlayback(double seconds);
@@ -198,6 +224,11 @@ private:
     int sourceSamples = 0;
     int sourceSampleRate = 44100;
     std::vector<LoraSlot> loras;
+    bool peakNormalize = true;
+    float peakNormalizeDb = 2.0f;
+    bool limiter = true;
+    float limiterCeilingDb = -0.3f;
+    float limiterKnee = 0.8f;
   };
 
   static int ModeIndex(RenderMode mode) noexcept;
@@ -212,6 +243,7 @@ private:
   void RenderWorkerMain(uint64_t requestId, RenderInput input);
   void StopWorker();
   void DownloadWorkerMain(int variantIdx, std::string destDir);
+  void DecoderLoraDownloadWorkerMain();
   void StopDownloadWorker();
   void TeardownContext();   // free the loaded sa3_context (caller must ensure no render is running)
   void SetStatus(const std::string& text);
@@ -281,6 +313,15 @@ private:
   mutable std::mutex mLoraMutex;
   std::vector<LoraSlot> mLoras;
 
+  mutable std::mutex mDecoderLoraMutex;
+  std::string mDecoderLoraPath;
+  std::atomic<bool> mDecoderLoraEnabled{true};
+  std::atomic<bool> mPeakNormalizeEnabled{true};
+  std::atomic<float> mPeakNormalizeDb{2.0f};
+  std::atomic<bool> mLimiterEnabled{true};
+  std::atomic<float> mLimiterCeilingDb{-0.3f};
+  std::atomic<float> mLimiterKnee{0.8f};
+
   std::atomic<int> mHostSampleRate{44100};
   std::thread mWorker;
   std::atomic<uint64_t> mRequestId{0};
@@ -299,4 +340,5 @@ private:
   std::atomic<bool> mDownloading{false};
   std::atomic<bool> mDownloadCancel{false};
   std::atomic<float> mDownloadProgress{0.0f};
+  std::atomic<int> mDownloadKind{0};   // 0=none, 1=model set, 2=SAME-L decoder correction
 };
