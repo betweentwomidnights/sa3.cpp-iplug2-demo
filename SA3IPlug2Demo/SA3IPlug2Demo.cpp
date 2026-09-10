@@ -492,8 +492,15 @@ public:
     g.DrawRoundRect(FrameSoft(), statusRect, 3.f);
     const std::string status = mPlugin.StatusText();
     const IRECT statusTextRect(statusRect.L + 8.f, statusRect.T, mStatusCopyRect.L - 5.f, statusRect.B);
+    const size_t statusMaxChars = FitChars(statusTextRect.W(), 6.5f, 18, 96);
+    mStatusTruncated = status.size() > statusMaxChars;
+    if (!mStatusTruncated && mStatusHovered)
+    {
+      mStatusHovered = false;
+      SetTooltip("Embedded libsa3 test surface");
+    }
     g.DrawText(IText(12.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(status, FitChars(statusTextRect.W(), 6.5f, 18, 96)).c_str(), statusTextRect);
+               CompactText(status, statusMaxChars).c_str(), statusTextRect);
     DrawCopyIcon(g, mStatusCopyRect.GetPadded(-4.f),
                  std::chrono::steady_clock::now() < mCopyFlashUntil ? Green()
                  : mCopyHovered ? COLOR_WHITE : TextDim());
@@ -529,7 +536,7 @@ public:
     const float outputHeight = std::min(190.f, std::max(150.f, shell.B - y - 14.f));
     const IRECT outputRect(left, y, right, y + outputHeight);
     DrawOutputPanel(g, outputRect);
-    if (mStatusHovered)
+    if (mStatusHovered && mStatusTruncated)
       DrawStatusTooltip(g, status);
   }
 
@@ -700,7 +707,7 @@ public:
 
   void OnMouseOver(float x, float y, const IMouseMod& mod) override
   {
-    const bool statusHovered = mStatusRect.Contains(x, y);
+    const bool statusHovered = mStatusTruncated && mStatusRect.Contains(x, y);
     const bool copyHovered = mStatusCopyRect.Contains(x, y);
     if (statusHovered != mStatusHovered || copyHovered != mCopyHovered)
     {
@@ -865,7 +872,7 @@ private:
 
   void DrawStatusTooltip(IGraphics& g, const std::string& status)
   {
-    if (status.empty() || mStatusRect.Empty()) return;
+    if (!mStatusTruncated || status.empty() || mStatusRect.Empty()) return;
     using namespace gary::ui;
     const float approxLines = std::ceil((float)status.size() / 48.f);
     const float height = std::clamp(22.f + approxLines * 15.f, 50.f, 230.f);
@@ -1596,6 +1603,7 @@ private:
   float mOutputDragStartY = 0.f;
   bool mSettingsOpen = false;
   bool mStatusHovered = false;
+  bool mStatusTruncated = false;
   bool mCopyHovered = false;
   std::chrono::steady_clock::time_point mCopyFlashUntil{};
 };
