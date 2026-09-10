@@ -62,6 +62,9 @@ public:
   SA3IPlug2Demo(const InstanceInfo& info);
   ~SA3IPlug2Demo() override;
 
+  bool SerializeState(IByteChunk& chunk) const override;
+  int UnserializeState(const IByteChunk& chunk, int startPos) override;
+
 #if IPLUG_DSP
   void OnActivate(bool active) override;
   void OnReset() override;
@@ -246,6 +249,8 @@ private:
   void DecoderLoraDownloadWorkerMain();
   void StopDownloadWorker();
   void TeardownContext();   // free the loaded sa3_context (caller must ensure no render is running)
+  void LoadPersistedCreativeLoras();
+  void PersistCreativeLoras();
   void SetStatus(const std::string& text);
   void SetSourceStatus(const std::string& text);
   void SetOutputStatus(const std::string& text);
@@ -312,6 +317,7 @@ private:
 
   mutable std::mutex mLoraMutex;
   std::vector<LoraSlot> mLoras;
+  std::atomic<bool> mCreativeLorasDirty{false};
 
   mutable std::mutex mDecoderLoraMutex;
   std::string mDecoderLoraPath;

@@ -39,6 +39,9 @@ namespace
 {
 constexpr const char* kDemoFont = "DemoRoboto";
 constexpr int kCtrlTagMain = 1000;
+constexpr uint32_t kPluginStateMagic = 0x53334133u; // "SA3" state chunk
+constexpr uint32_t kPluginStateVersion = 1u;
+constexpr int kMaxPersistedLoras = 64;
 
 std::string CompactText(std::string text, size_t maxChars)
 {
@@ -99,6 +102,18 @@ float ParseFloatSetting(const std::string& text, float fallback, float lo, float
   const float parsed = std::strtof(text.c_str(), &end);
   if (end == text.c_str() || (end && *end != '\0') || !std::isfinite(parsed)) return fallback;
   return std::clamp(parsed, lo, hi);
+}
+
+int ParseIntSetting(const std::string& text, int fallback, int lo, int hi) noexcept
+{
+  if (text.empty()) return fallback;
+  errno = 0;
+  char* end = nullptr;
+  const long parsed = std::strtol(text.c_str(), &end, 10);
+  if (end == text.c_str() || (end && *end != '\0') || errno == ERANGE) return fallback;
+  if (parsed <= static_cast<long>(lo)) return lo;
+  if (parsed >= static_cast<long>(hi)) return hi;
+  return static_cast<int>(parsed);
 }
 
 std::string SettingFloat(float value)
@@ -1624,6 +1639,7 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
   mLimiterEnabled.store(ParseBoolSetting(gary::LoadSetting("limiter_enabled"), true), std::memory_order_release);
   mLimiterCeilingDb.store(ParseFloatSetting(gary::LoadSetting("limiter_ceiling_db"), -0.3f, -6.f, 0.f), std::memory_order_release);
   mLimiterKnee.store(ParseFloatSetting(gary::LoadSetting("limiter_knee"), 0.8f, 0.1f, 1.f), std::memory_order_release);
+  LoadPersistedCreativeLoras();
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
@@ -1654,6 +1670,8 @@ int SA3IPlug2Demo::ModeIndex(RenderMode mode) noexcept
 
 SA3IPlug2Demo::~SA3IPlug2Demo()
 {
+  if (mCreativeLorasDirty.load(std::memory_order_acquire))
+    PersistCreativeLoras();
   StopWorker();
   StopDownloadWorker();
   TeardownContext();
@@ -1718,6 +1736,8 @@ void SA3IPlug2Demo::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 #if IPLUG_EDITOR
 void SA3IPlug2Demo::OnUIClose()
 {
+  if (mCreativeLorasDirty.load(std::memory_order_acquire))
+    PersistCreativeLoras();
   CancelRender();
 }
 
@@ -2167,6 +2187,61 @@ gary::AudioFileInfo SA3IPlug2Demo::CreateOutputDragCopy()
   return info;
 }
 
+void SA3IPlug2Demo::LoadPersistedCreativeLoras()
+{
+  const int count = ParseIntSetting(gary::LoadSetting("creative_lora_count"), 0, 0, kMaxPersistedLoras);
+  std::vector<LoraSlot> restored;
+  restored.reserve(static_cast<size_t>(count));
+  int unavailable = 0;
+  for (int i = 0; i < count; ++i)
+  {
+    const std::string prefix = "creative_lora_" + std::to_string(i) + "_";
+    const std::string path = gary::LoadSetting(prefix + "path");
+    if (path.empty())
+      continue;
+    const auto info = gary::ImportLoraFile(path);
+    if (!info.ok)
+    {
+      ++unavailable;
+      continue;
+    }
+    LoraSlot slot;
+    slot.path = info.path;
+    slot.name = info.name.empty() ? FileNameFromPath(info.path) : info.name;
+    slot.prompts = info.prompts;
+    slot.strength = ParseFloatSetting(gary::LoadSetting(prefix + "strength"), 1.f, 0.f, 2.f);
+    slot.enabled = ParseBoolSetting(gary::LoadSetting(prefix + "enabled"), true);
+    restored.push_back(std::move(slot));
+  }
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    mLoras = std::move(restored);
+  }
+  if (unavailable > 0)
+    SetStatus(std::to_string(unavailable) + " remembered LoRA" + (unavailable == 1 ? " is" : "s are") + " unavailable");
+}
+
+void SA3IPlug2Demo::PersistCreativeLoras()
+{
+  std::vector<LoraSlot> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    snapshot.assign(mLoras.begin(), mLoras.begin()
+                    + static_cast<ptrdiff_t>(std::min<size_t>(mLoras.size(), kMaxPersistedLoras)));
+  }
+  bool saved = true;
+  for (size_t i = 0; i < snapshot.size(); ++i)
+  {
+    const std::string prefix = "creative_lora_" + std::to_string(i) + "_";
+    saved = gary::SaveSetting(prefix + "path", snapshot[i].path) && saved;
+    saved = gary::SaveSetting(prefix + "strength", SettingFloat(snapshot[i].strength)) && saved;
+    saved = gary::SaveSetting(prefix + "enabled", snapshot[i].enabled ? "1" : "0") && saved;
+  }
+  // Write the count last so an interrupted add never exposes a half-written slot.
+  saved = gary::SaveSetting("creative_lora_count", std::to_string(snapshot.size())) && saved;
+  mCreativeLorasDirty.store(!saved, std::memory_order_release);
+}
+
 bool SA3IPlug2Demo::ImportLoraFromDialog()
 {
 #ifdef _WIN32
@@ -2203,6 +2278,7 @@ bool SA3IPlug2Demo::ImportLoraFromDialog()
     std::lock_guard<std::mutex> lock(mLoraMutex);
     mLoras.push_back(std::move(slot));
   }
+  PersistCreativeLoras();
   SetStatus(status);
   return true;
 #else
@@ -2213,29 +2289,236 @@ bool SA3IPlug2Demo::ImportLoraFromDialog()
 
 void SA3IPlug2Demo::RemoveLora(size_t index)
 {
-  std::lock_guard<std::mutex> lock(mLoraMutex);
-  if (index < mLoras.size())
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    if (index >= mLoras.size())
+      return;
     mLoras.erase(mLoras.begin() + (ptrdiff_t)index);
+  }
+  PersistCreativeLoras();
 }
 
 void SA3IPlug2Demo::SetLoraStrength(size_t index, float strength)
 {
-  std::lock_guard<std::mutex> lock(mLoraMutex);
-  if (index < mLoras.size())
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    if (index >= mLoras.size())
+      return;
     mLoras[index].strength = std::clamp(strength, 0.0f, 2.0f);
+  }
+  // Sliders update continuously while dragging; defer the disk write until the UI or instance closes.
+  mCreativeLorasDirty.store(true, std::memory_order_release);
 }
 
 void SA3IPlug2Demo::SetLoraEnabled(size_t index, bool enabled)
 {
-  std::lock_guard<std::mutex> lock(mLoraMutex);
-  if (index < mLoras.size())
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    if (index >= mLoras.size())
+      return;
     mLoras[index].enabled = enabled;
+  }
+  PersistCreativeLoras();
 }
 
 std::vector<SA3IPlug2Demo::LoraSlot> SA3IPlug2Demo::Loras() const
 {
   std::lock_guard<std::mutex> lock(mLoraMutex);
   return mLoras;
+}
+
+bool SA3IPlug2Demo::SerializeState(IByteChunk& chunk) const
+{
+  chunk.Put(&kPluginStateMagic);
+  chunk.Put(&kPluginStateVersion);
+
+  {
+    std::lock_guard<std::mutex> lock(mPromptMutex);
+    for (const auto& prompt : mPrompts)
+      chunk.PutStr(prompt.c_str());
+  }
+
+  const int32_t currentMode = std::clamp(mCurrentMode.load(std::memory_order_acquire), 0, 2);
+  chunk.Put(&currentMode);
+  for (const auto& duration : mDurationSeconds)
+  {
+    const int32_t value = duration.load(std::memory_order_acquire);
+    chunk.Put(&value);
+  }
+
+  const int32_t steps = mSteps.load(std::memory_order_acquire);
+  const float cfgScale = mCfgScale.load(std::memory_order_acquire);
+  const float initNoise = mInitNoiseLevel.load(std::memory_order_acquire);
+  const uint8_t useSeed = mUseSeed.load(std::memory_order_acquire) ? 1u : 0u;
+  const int64_t seed = mSeedValue.load(std::memory_order_acquire);
+  const int64_t lastSeed = mLastSeed.load(std::memory_order_acquire);
+  const uint8_t hasLastSeed = mHasLastSeed.load(std::memory_order_acquire) ? 1u : 0u;
+  const double bpm = mBpm.load(std::memory_order_acquire);
+  const uint8_t bpmOverride = mBpmOverride.load(std::memory_order_acquire) ? 1u : 0u;
+  const uint8_t appendBpm = mAppendBpm.load(std::memory_order_acquire) ? 1u : 0u;
+  const int32_t keyRoot = mKeyRoot.load(std::memory_order_acquire);
+  const int32_t keyMode = mKeyMode.load(std::memory_order_acquire);
+  const int32_t loopBars = mLoopBars.load(std::memory_order_acquire);
+  const int32_t distShift = mDistShift.load(std::memory_order_acquire);
+  chunk.Put(&steps);
+  chunk.Put(&cfgScale);
+  chunk.Put(&initNoise);
+  chunk.Put(&useSeed);
+  chunk.Put(&seed);
+  chunk.Put(&lastSeed);
+  chunk.Put(&hasLastSeed);
+  chunk.Put(&bpm);
+  chunk.Put(&bpmOverride);
+  chunk.Put(&appendBpm);
+  chunk.Put(&keyRoot);
+  chunk.Put(&keyMode);
+  chunk.Put(&loopBars);
+  chunk.Put(&distShift);
+
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    const uint32_t count = static_cast<uint32_t>(std::min<size_t>(mLoras.size(), kMaxPersistedLoras));
+    chunk.Put(&count);
+    for (uint32_t i = 0; i < count; ++i)
+    {
+      chunk.PutStr(mLoras[i].path.c_str());
+      chunk.Put(&mLoras[i].strength);
+      const uint8_t enabled = mLoras[i].enabled ? 1u : 0u;
+      chunk.Put(&enabled);
+    }
+  }
+
+  return SerializeParams(chunk);
+}
+
+int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
+{
+  const int originalPos = startPos;
+  uint32_t magic = 0;
+  int next = chunk.Get(&magic, startPos);
+  if (next < 0 || magic != kPluginStateMagic)
+    return UnserializeParams(chunk, originalPos); // projects saved before custom chunks existed
+  startPos = next;
+
+  uint32_t version = 0;
+  if ((startPos = chunk.Get(&version, startPos)) < 0 || version != kPluginStateVersion)
+    return -1;
+
+  std::array<std::string, 3> prompts;
+  auto readString = [&](std::string& value) {
+    WDL_String text;
+    const int oldPos = startPos;
+    const int endPos = chunk.GetStr(text, startPos);
+    if (endPos < oldPos + static_cast<int>(sizeof(int)) || text.GetLength() > 65536)
+      return false;
+    startPos = endPos;
+    value = text.Get();
+    return true;
+  };
+  auto readValue = [&](auto& value) {
+    const int endPos = chunk.Get(&value, startPos);
+    if (endPos < 0)
+      return false;
+    startPos = endPos;
+    return true;
+  };
+
+  for (auto& prompt : prompts)
+    if (!readString(prompt)) return -1;
+
+  int32_t currentMode = 0;
+  std::array<int32_t, 3> durations{};
+  int32_t steps = 8;
+  float cfgScale = 1.f;
+  float initNoise = 0.5f;
+  uint8_t useSeed = 0;
+  int64_t seed = 0;
+  int64_t lastSeed = 0;
+  uint8_t hasLastSeed = 0;
+  double bpm = 120.0;
+  uint8_t bpmOverride = 0;
+  uint8_t appendBpm = 1;
+  int32_t keyRoot = 0;
+  int32_t keyMode = 0;
+  int32_t loopBars = 0;
+  int32_t distShift = 0;
+  if (!readValue(currentMode)) return -1;
+  for (auto& duration : durations)
+    if (!readValue(duration)) return -1;
+  if (!readValue(steps) || !readValue(cfgScale) || !readValue(initNoise)
+      || !readValue(useSeed) || !readValue(seed) || !readValue(lastSeed)
+      || !readValue(hasLastSeed) || !readValue(bpm) || !readValue(bpmOverride)
+      || !readValue(appendBpm) || !readValue(keyRoot) || !readValue(keyMode)
+      || !readValue(loopBars) || !readValue(distShift))
+    return -1;
+
+  uint32_t loraCount = 0;
+  if (!readValue(loraCount) || loraCount > static_cast<uint32_t>(kMaxPersistedLoras))
+    return -1;
+
+  struct SavedLora { std::string path; float strength = 1.f; bool enabled = true; };
+  std::vector<SavedLora> savedLoras;
+  savedLoras.reserve(loraCount);
+  for (uint32_t i = 0; i < loraCount; ++i)
+  {
+    SavedLora saved;
+    uint8_t enabled = 1;
+    if (!readString(saved.path) || !readValue(saved.strength) || !readValue(enabled))
+      return -1;
+    saved.enabled = enabled != 0;
+    savedLoras.push_back(std::move(saved));
+  }
+
+  std::vector<LoraSlot> restoredLoras;
+  int unavailableLoras = 0;
+  for (const auto& saved : savedLoras)
+  {
+    const auto info = gary::ImportLoraFile(saved.path);
+    if (!info.ok)
+    {
+      ++unavailableLoras;
+      continue;
+    }
+    LoraSlot slot;
+    slot.path = info.path;
+    slot.name = info.name.empty() ? FileNameFromPath(info.path) : info.name;
+    slot.prompts = info.prompts;
+    slot.strength = std::clamp(std::isfinite(saved.strength) ? saved.strength : 1.f, 0.f, 2.f);
+    slot.enabled = saved.enabled;
+    restoredLoras.push_back(std::move(slot));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(mPromptMutex);
+    mPrompts = std::move(prompts);
+  }
+  mCurrentMode.store(std::clamp<int32_t>(currentMode, 0, 2), std::memory_order_release);
+  for (size_t i = 0; i < durations.size(); ++i)
+    mDurationSeconds[i].store(std::clamp<int32_t>(durations[i], 1, 300), std::memory_order_release);
+  mSteps.store(std::clamp<int32_t>(steps, 1, 16), std::memory_order_release);
+  mCfgScale.store(std::clamp(std::isfinite(cfgScale) ? cfgScale : 1.f, 0.5f, 2.f), std::memory_order_release);
+  mInitNoiseLevel.store(std::clamp(std::isfinite(initNoise) ? initNoise : 0.5f, 0.01f, 1.f), std::memory_order_release);
+  mUseSeed.store(useSeed != 0, std::memory_order_release);
+  mSeedValue.store(std::max<int64_t>(0, seed), std::memory_order_release);
+  mLastSeed.store(std::max<int64_t>(0, lastSeed), std::memory_order_release);
+  mHasLastSeed.store(hasLastSeed != 0, std::memory_order_release);
+  mBpm.store(std::clamp(std::isfinite(bpm) ? bpm : 120.0, 20.0, 300.0), std::memory_order_release);
+  mBpmOverride.store(bpmOverride != 0, std::memory_order_release);
+  mAppendBpm.store(appendBpm != 0, std::memory_order_release);
+  mKeyRoot.store(std::clamp<int32_t>(keyRoot, 0, 12), std::memory_order_release);
+  mKeyMode.store(keyMode ? 1 : 0, std::memory_order_release);
+  mLoopBars.store((loopBars == 4 || loopBars == 8 || loopBars == 16) ? loopBars : 0, std::memory_order_release);
+  mDistShift.store(std::clamp<int32_t>(distShift, 0, 3), std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(mLoraMutex);
+    mLoras = std::move(restoredLoras);
+  }
+  // Host state is per instance; merely loading a preset must not replace the user's global LoRA defaults.
+  mCreativeLorasDirty.store(false, std::memory_order_release);
+  if (unavailableLoras > 0)
+    SetStatus(std::to_string(unavailableLoras) + " saved LoRA" + (unavailableLoras == 1 ? " is" : "s are") + " unavailable");
+
+  return UnserializeParams(chunk, startPos);
 }
 
 void SA3IPlug2Demo::SetDecoderLoraEnabled(bool enabled)
