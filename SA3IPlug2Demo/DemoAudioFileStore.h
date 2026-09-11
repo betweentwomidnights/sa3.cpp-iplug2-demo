@@ -80,6 +80,7 @@ void ProcessClose(AsyncProcess& proc);                    // release handle
 
 AudioFileInfo SaveRecordingWav(const RecordingSnapshot& snapshot);
 AudioFileInfo SaveOutputWav(const RecordingSnapshot& snapshot);
+AudioFileInfo SaveWavFile(const std::string& path, const RecordingSnapshot& snapshot);
 AudioFileInfo SaveOutputBase64Audio(const std::string& base64Audio);
 AudioFileInfo ImportLoraFile(const std::string& path);
 std::vector<std::string> LoadDefaultPromptPool();

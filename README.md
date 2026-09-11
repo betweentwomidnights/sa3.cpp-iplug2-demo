@@ -178,9 +178,17 @@ existing folder, and persist that folder plus the selected variant.
 
 ### REAPER extension UX prototype
 
-The repository also builds an early REAPER extension target. This first checkpoint intentionally does not run
-`libsa3` yet: it registers Transform, Continue, and Generate actions, adds Transform and Continue to the media-item
-context menu, and opens a dockable panel that follows the selected item, time selection, tempo, and time signature.
+The repository also builds an early REAPER extension target. It registers Transform, Continue, and Generate actions,
+adds Transform and Continue to the media-item context menu, and opens a dockable panel that follows the selected item,
+destination track, time selection, tempo, and time signature.
+
+Generate is connected end-to-end through the embedded `libsa3` runtime. Select exactly one destination track, make a
+time selection between 1 and 300 seconds, enter a prompt, and click `generate into selection`. The extension captures
+that track/range for the duration of the background render, writes each result to a unique WAV under
+`Documents/sa3-iplug2-demo/reaper_audio`, and replaces only the overlapping portion of items on that track. The edit is
+one REAPER undo step. Model variant, creative LoRAs, the SAME-L decoder LoRA, and loudness processing are read from the
+same persisted settings used by the VST3, while the Generate prompt is stored per project in the `.RPP`. Transform and
+Continue remain selection-aware placeholders for the next slices.
 
 Build and install it for the current Windows user with:
 
@@ -189,6 +197,7 @@ cmake --build build --config Release --target SA3ReaperExtension
 $reaperPlugins = Join-Path $env:APPDATA 'REAPER\UserPlugins'
 New-Item -ItemType Directory -Force $reaperPlugins | Out-Null
 Copy-Item .\build\out\reaper_SA3ReaperExtension.dll $reaperPlugins -Force
+Copy-Item .\build\out\SA3ReaperExtension $reaperPlugins -Recurse -Force
 ```
 
 Restart REAPER after copying the DLL. The commands appear under `Extensions > SA3` and in the Actions list;

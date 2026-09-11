@@ -1231,6 +1231,34 @@ AudioFileInfo SaveOutputWav(const RecordingSnapshot& snapshot)
   return info;
 }
 
+AudioFileInfo SaveWavFile(const std::string& path, const RecordingSnapshot& snapshot)
+{
+  AudioFileInfo info;
+  info.path = path;
+  info.numSamples = snapshot.numSamples;
+  info.sampleRate = snapshot.sampleRate;
+  info.numChannels = static_cast<int>(snapshot.channels.size());
+
+  if (path.empty())
+  {
+    info.error = "output path is empty";
+    return info;
+  }
+
+  std::string error;
+  if (!WritePcm16Wav(path, snapshot, error))
+  {
+    info.error = error;
+    return info;
+  }
+
+  info.bytes = FileSizeBytes(path);
+  info.ok = info.bytes > 0;
+  if (!info.ok)
+    info.error = "WAV write completed but output file is empty";
+  return info;
+}
+
 AudioFileInfo SaveOutputBase64Audio(const std::string& base64Audio)
 {
   AudioFileInfo info;
