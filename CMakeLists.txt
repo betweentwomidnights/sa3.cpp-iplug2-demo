@@ -52,3 +52,4 @@ set(SA3_RUNTIME_LIBS ${SA3_RUNTIME_DLLS} ${SA3_RUNTIME_DYLIBS})
 list(REMOVE_DUPLICATES SA3_RUNTIME_LIBS)
 
 add_subdirectory(SA3IPlug2Demo)
+add_subdirectory(SA3ReaperExtension)
