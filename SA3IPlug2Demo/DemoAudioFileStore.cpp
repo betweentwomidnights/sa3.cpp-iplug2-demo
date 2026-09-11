@@ -1891,6 +1891,80 @@ bool SaveSetting(const std::string& key, const std::string& value)
   return static_cast<bool>(out);
 }
 
+std::vector<PersistedCreativeLora> LoadCreativeLoraRegistry(const std::string& variant)
+{
+  constexpr int kMaximumLoras = 64;
+  const bool smallModel = VariantIsSmall(variant);
+  const std::string registryPrefix = smallModel ? "creative_lora_small_music_" : "creative_lora_medium_";
+  std::string countText = LoadSetting(registryPrefix + "count");
+  std::string itemPrefix = registryPrefix;
+
+  // Before registries were model-specific, every saved creative LoRA targeted medium.
+  // Keep reading that list as medium until the user next edits it, at which point the
+  // explicit medium registry is written by SaveCreativeLoraRegistry().
+  if (!smallModel && countText.empty())
+  {
+    countText = LoadSetting("creative_lora_count");
+    itemPrefix = "creative_lora_";
+  }
+
+  int count = 0;
+  if (!countText.empty())
+  {
+    char* end = nullptr;
+    const long parsed = std::strtol(countText.c_str(), &end, 10);
+    if (end != countText.c_str() && (!end || *end == '\0'))
+      count = std::clamp(static_cast<int>(parsed), 0, kMaximumLoras);
+  }
+
+  std::vector<PersistedCreativeLora> loras;
+  loras.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i)
+  {
+    const std::string prefix = itemPrefix + std::to_string(i) + "_";
+    const std::string path = LoadSetting(prefix + "path");
+    if (path.empty())
+      continue;
+    PersistedCreativeLora lora;
+    lora.path = path;
+    const std::string strengthText = LoadSetting(prefix + "strength");
+    if (!strengthText.empty())
+    {
+      char* end = nullptr;
+      const float parsed = std::strtof(strengthText.c_str(), &end);
+      if (end != strengthText.c_str() && (!end || *end == '\0') && std::isfinite(parsed))
+        lora.strength = std::clamp(parsed, 0.f, 2.f);
+    }
+    const std::string enabledText = LoadSetting(prefix + "enabled");
+    if (enabledText == "0" || enabledText == "false" || enabledText == "off")
+      lora.enabled = false;
+    loras.push_back(std::move(lora));
+  }
+  return loras;
+}
+
+bool SaveCreativeLoraRegistry(const std::string& variant,
+                              const std::vector<PersistedCreativeLora>& loras)
+{
+  constexpr size_t kMaximumLoras = 64;
+  const std::string registryPrefix = VariantIsSmall(variant)
+    ? "creative_lora_small_music_" : "creative_lora_medium_";
+  const size_t count = std::min(loras.size(), kMaximumLoras);
+  bool saved = true;
+  for (size_t i = 0; i < count; ++i)
+  {
+    const std::string prefix = registryPrefix + std::to_string(i) + "_";
+    char strength[32] = {};
+    std::snprintf(strength, sizeof(strength), "%.3f", std::clamp(loras[i].strength, 0.f, 2.f));
+    saved = SaveSetting(prefix + "path", loras[i].path) && saved;
+    saved = SaveSetting(prefix + "strength", strength) && saved;
+    saved = SaveSetting(prefix + "enabled", loras[i].enabled ? "1" : "0") && saved;
+  }
+  // Count is written last so an interrupted update cannot expose partial entries.
+  saved = SaveSetting(registryPrefix + "count", std::to_string(count)) && saved;
+  return saved;
+}
+
 std::string DefaultModelsDirectory(std::string* error)
 {
   const std::string documents = DocumentsDirectory(error);

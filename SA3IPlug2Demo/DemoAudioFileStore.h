@@ -38,6 +38,19 @@ std::string Sa3CppDirectory();
 std::string LoadSetting(const std::string& key);                       // "" when absent
 bool SaveSetting(const std::string& key, const std::string& value);    // upsert one key
 
+// Creative LoRAs are stored per generation-model family. Legacy creative_lora_* keys are
+// treated as the medium registry so existing installs migrate without losing adapters.
+struct PersistedCreativeLora
+{
+  std::string path;
+  float strength = 1.f;
+  bool enabled = true;
+};
+
+std::vector<PersistedCreativeLora> LoadCreativeLoraRegistry(const std::string& variant);
+bool SaveCreativeLoraRegistry(const std::string& variant,
+                              const std::vector<PersistedCreativeLora>& loras);
+
 std::string DefaultModelsDirectory(std::string* error = nullptr);      // Documents/sa3-iplug2-demo/models
 
 // --- Model set: the five gguf files a generation needs, per variant/encoding ------------------------

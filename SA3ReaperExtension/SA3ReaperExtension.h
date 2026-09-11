@@ -1,18 +1,28 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "ReaperExt_include_in_plug_hdr.h"
 #include "SA3RenderService.h"
 
 class MediaTrack;
+class MediaItem;
+class PCM_source;
+class SA3CreativeLoraControl;
+class SA3SettingsControl;
 
 using namespace iplug;
 using namespace igraphics;
 
 enum EControlTags
 {
-  kCtrlTagOperation = 0,
+  kCtrlTagBackground = 0,
+  kCtrlTagOperation,
   kCtrlTagSelection,
   kCtrlTagTiming,
   kCtrlTagHint,
@@ -20,7 +30,10 @@ enum EControlTags
   kCtrlTagContinue,
   kCtrlTagGenerate,
   kCtrlTagPrompt,
+  kCtrlTagCreativeLoras,
   kCtrlTagRun,
+  kCtrlTagSettingsButton,
+  kCtrlTagSettings,
   kNumCtrlTags
 };
 
@@ -37,6 +50,9 @@ public:
   void OnBeginLoadProjectState(bool isUndo) override;
 
 private:
+  friend class SA3SettingsControl;
+  friend class SA3CreativeLoraControl;
+
   enum class Operation
   {
     Transform,
@@ -70,6 +86,7 @@ private:
   void SelectOperation(Operation operation);
   void StartOrCancelGeneration();
   void FinishGeneration(gary::SA3RenderResult result);
+  void ContinuePendingPeakBuilds();
   bool ReplaceTimeSelectionWithAudio(MediaTrack* track, double start, double end,
                                      const std::string& wavPath, const std::string& prompt,
                                      std::string& error);
@@ -77,6 +94,33 @@ private:
   void SyncPromptFromUI();
   void RefreshPanel(bool force = false);
   void SetTaggedText(int tag, const char* text);
+  void ApplyResponsiveLayout(IGraphics* graphics);
+  void ToggleSettingsPage();
+
+  void ReloadSharedSettings(bool scanModels = true);
+  void ChooseModelsFolder();
+  void SelectModelVariant(const char* variant);
+  void SetDecoderLoraEnabled(bool enabled);
+  void ChooseDecoderLora();
+  void ClearDecoderLora();
+  void StartOrCancelDecoderLoraDownload();
+  void DecoderLoraDownloadWorkerMain();
+  void StopDecoderLoraDownload();
+  void SetDecoderDownloadStatus(const std::string& status);
+  std::string DecoderDownloadStatus() const;
+  void SetPeakNormalizeEnabled(bool enabled);
+  void SetPeakNormalizeDb(float db);
+  void SetLimiterEnabled(bool enabled);
+  void SetLimiterCeilingDb(float db);
+  void SetLimiterKnee(float knee);
+  void ResetOutputProcessing();
+  void SetRawOutputProcessing();
+  void ReloadCreativeLoras();
+  void PersistCreativeLoras();
+  void AddCreativeLora();
+  void RemoveCreativeLora(size_t index);
+  void ToggleCreativeLora(size_t index);
+  void SetCreativeLoraStrength(size_t index, float strength);
 
   struct PendingGeneration
   {
@@ -86,11 +130,52 @@ private:
     std::string prompt;
   };
 
+  struct PendingPeakBuild
+  {
+    MediaItem* item = nullptr;
+    PCM_source* source = nullptr;
+  };
+
+  struct CreativeLora
+  {
+    std::string name;
+    std::string path;
+    float strength = 1.f;
+    bool enabled = true;
+  };
+
   Operation mOperation = Operation::Transform;
   SelectionSnapshot mSelection;
   bool mHasSelectionSnapshot = false;
   std::string mPrompt;
   std::string mPanelStatus = "Set a time selection and choose one destination track.";
   PendingGeneration mPendingGeneration;
+  std::vector<PendingPeakBuild> mPendingPeakBuilds;
   gary::SA3RenderService mRenderService;
+
+  bool mSettingsOpen = false;
+  bool mWideLayout = false;
+  std::string mSettingsNotice = "Changes apply to the next render.";
+  std::string mModelsDir;
+  std::string mModelVariant = "medium";
+  bool mMediumModelsAvailable = false;
+  bool mSmallModelsAvailable = false;
+  std::string mDecoderLoraPath;
+  bool mDecoderLoraEnabled = true;
+  bool mPeakNormalizeEnabled = true;
+  float mPeakNormalizeDb = 2.f;
+  bool mLimiterEnabled = true;
+  float mLimiterCeilingDb = -0.3f;
+  float mLimiterKnee = 0.8f;
+  std::vector<CreativeLora> mCreativeLoras;
+  int mSettingsRefreshTicks = 0;
+
+  std::thread mDecoderDownloadWorker;
+  std::atomic<bool> mDecoderDownloadBusy{false};
+  std::atomic<bool> mDecoderDownloadCancel{false};
+  std::atomic<float> mDecoderDownloadProgress{0.f};
+  std::atomic<uint64_t> mDecoderDownloadRevision{0};
+  uint64_t mSeenDecoderDownloadRevision = 0;
+  mutable std::mutex mDecoderDownloadStatusMutex;
+  std::string mDecoderDownloadStatus;
 };

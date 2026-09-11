@@ -1,7 +1,6 @@
 #include "SA3RenderService.h"
 
 #include <algorithm>
-#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -24,8 +23,6 @@ namespace gary
 {
 namespace
 {
-constexpr int kMaxPersistedLoras = 64;
-
 bool ParseBool(const std::string& text, bool fallback)
 {
   if (text.empty()) return fallback;
@@ -42,19 +39,6 @@ float ParseFloat(const std::string& text, float fallback, float low, float high)
   if (end == text.c_str() || (end && *end != '\0') || !std::isfinite(value))
     return fallback;
   return std::clamp(value, low, high);
-}
-
-int ParseInt(const std::string& text, int fallback, int low, int high)
-{
-  if (text.empty()) return fallback;
-  errno = 0;
-  char* end = nullptr;
-  const long value = std::strtol(text.c_str(), &end, 10);
-  if (end == text.c_str() || (end && *end != '\0') || errno == ERANGE)
-    return fallback;
-  if (value <= static_cast<long>(low)) return low;
-  if (value >= static_cast<long>(high)) return high;
-  return static_cast<int>(value);
 }
 
 int64_t RequestableSeed(uint64_t seed)
@@ -246,14 +230,11 @@ SA3TextGenerationRequest LoadSharedTextGenerationRequest(std::string prompt,
   request.limiterCeilingDb = ParseFloat(LoadSetting("limiter_ceiling_db"), -0.3f, -6.f, 0.f);
   request.limiterKnee = ParseFloat(LoadSetting("limiter_knee"), 0.8f, 0.1f, 1.f);
 
-  const int loraCount = ParseInt(LoadSetting("creative_lora_count"), 0, 0, kMaxPersistedLoras);
-  for (int i = 0; i < loraCount; ++i)
+  const auto creativeLoras = LoadCreativeLoraRegistry(request.variant);
+  for (const auto& lora : creativeLoras)
   {
-    const std::string prefix = "creative_lora_" + std::to_string(i) + "_";
-    const std::string path = LoadSetting(prefix + "path");
-    const bool enabled = ParseBool(LoadSetting(prefix + "enabled"), true);
-    if (enabled && !path.empty() && FileSizeBytes(path) > 0)
-      request.loras.push_back({path, ParseFloat(LoadSetting(prefix + "strength"), 1.f, 0.f, 2.f)});
+    if (lora.enabled && !lora.path.empty() && FileSizeBytes(lora.path) > 0)
+      request.loras.push_back({lora.path, lora.strength});
   }
 
   if (request.variant == "medium" && ParseBool(LoadSetting("decoder_lora_same_l_enabled"), true))

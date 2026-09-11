@@ -104,18 +104,6 @@ float ParseFloatSetting(const std::string& text, float fallback, float lo, float
   return std::clamp(parsed, lo, hi);
 }
 
-int ParseIntSetting(const std::string& text, int fallback, int lo, int hi) noexcept
-{
-  if (text.empty()) return fallback;
-  errno = 0;
-  char* end = nullptr;
-  const long parsed = std::strtol(text.c_str(), &end, 10);
-  if (end == text.c_str() || (end && *end != '\0') || errno == ERANGE) return fallback;
-  if (parsed <= static_cast<long>(lo)) return lo;
-  if (parsed >= static_cast<long>(hi)) return hi;
-  return static_cast<int>(parsed);
-}
-
 std::string SettingFloat(float value)
 {
   char text[32] = {};
@@ -1902,6 +1890,10 @@ bool SA3IPlug2Demo::UseModelsFolder(const std::string& dir, const std::string& v
     return false;
   }
 
+  const bool variantChanged = ModelVariant() != v;
+  if (variantChanged && mCreativeLorasDirty.load(std::memory_order_acquire))
+    PersistCreativeLoras();
+
   {
     std::lock_guard<std::mutex> lock(mModelsMutex);
     mModelsDirSetting = dir;
@@ -1917,6 +1909,8 @@ bool SA3IPlug2Demo::UseModelsFolder(const std::string& dir, const std::string& v
     gary::SaveSetting("models_dir", dir);
     gary::SaveSetting("variant", v);
   }
+  if (variantChanged)
+    LoadPersistedCreativeLoras();
   SetStatus("models ready (" + v + "): " + dir);
   return true;
 }
@@ -1938,6 +1932,8 @@ bool SA3IPlug2Demo::SelectVariant(const std::string& variant)
   }
 
   bool changed = false;
+  if (ModelVariant() != v && mCreativeLorasDirty.load(std::memory_order_acquire))
+    PersistCreativeLoras();
   {
     std::lock_guard<std::mutex> lock(mModelsMutex);
     if (mModelVariant != v)
@@ -1951,6 +1947,7 @@ bool SA3IPlug2Demo::SelectVariant(const std::string& variant)
     if (!mBusy.load(std::memory_order_acquire))
       TeardownContext();   // the loaded context is the old variant — reload on next render
     gary::SaveSetting("variant", v);
+    LoadPersistedCreativeLoras();
   }
   mModelsPresent.store(true, std::memory_order_release);
   SetStatus("active model: " + v);
@@ -2193,17 +2190,15 @@ gary::AudioFileInfo SA3IPlug2Demo::CreateOutputDragCopy()
 
 void SA3IPlug2Demo::LoadPersistedCreativeLoras()
 {
-  const int count = ParseIntSetting(gary::LoadSetting("creative_lora_count"), 0, 0, kMaxPersistedLoras);
+  const auto savedLoras = gary::LoadCreativeLoraRegistry(ModelVariant());
   std::vector<LoraSlot> restored;
-  restored.reserve(static_cast<size_t>(count));
+  restored.reserve(savedLoras.size());
   int unavailable = 0;
-  for (int i = 0; i < count; ++i)
+  for (const auto& saved : savedLoras)
   {
-    const std::string prefix = "creative_lora_" + std::to_string(i) + "_";
-    const std::string path = gary::LoadSetting(prefix + "path");
-    if (path.empty())
+    if (saved.path.empty())
       continue;
-    const auto info = gary::ImportLoraFile(path);
+    const auto info = gary::ImportLoraFile(saved.path);
     if (!info.ok)
     {
       ++unavailable;
@@ -2213,14 +2208,15 @@ void SA3IPlug2Demo::LoadPersistedCreativeLoras()
     slot.path = info.path;
     slot.name = info.name.empty() ? FileNameFromPath(info.path) : info.name;
     slot.prompts = info.prompts;
-    slot.strength = ParseFloatSetting(gary::LoadSetting(prefix + "strength"), 1.f, 0.f, 2.f);
-    slot.enabled = ParseBoolSetting(gary::LoadSetting(prefix + "enabled"), true);
+    slot.strength = saved.strength;
+    slot.enabled = saved.enabled;
     restored.push_back(std::move(slot));
   }
   {
     std::lock_guard<std::mutex> lock(mLoraMutex);
     mLoras = std::move(restored);
   }
+  mCreativeLorasDirty.store(false, std::memory_order_release);
   if (unavailable > 0)
     SetStatus(std::to_string(unavailable) + " remembered LoRA" + (unavailable == 1 ? " is" : "s are") + " unavailable");
 }
@@ -2233,16 +2229,12 @@ void SA3IPlug2Demo::PersistCreativeLoras()
     snapshot.assign(mLoras.begin(), mLoras.begin()
                     + static_cast<ptrdiff_t>(std::min<size_t>(mLoras.size(), kMaxPersistedLoras)));
   }
-  bool saved = true;
-  for (size_t i = 0; i < snapshot.size(); ++i)
-  {
-    const std::string prefix = "creative_lora_" + std::to_string(i) + "_";
-    saved = gary::SaveSetting(prefix + "path", snapshot[i].path) && saved;
-    saved = gary::SaveSetting(prefix + "strength", SettingFloat(snapshot[i].strength)) && saved;
-    saved = gary::SaveSetting(prefix + "enabled", snapshot[i].enabled ? "1" : "0") && saved;
-  }
-  // Write the count last so an interrupted add never exposes a half-written slot.
-  saved = gary::SaveSetting("creative_lora_count", std::to_string(snapshot.size())) && saved;
+  std::vector<gary::PersistedCreativeLora> savedLoras;
+  savedLoras.reserve(snapshot.size());
+  for (const auto& slot : snapshot)
+    savedLoras.push_back({slot.path, slot.strength, slot.enabled});
+
+  const bool saved = gary::SaveCreativeLoraRegistry(ModelVariant(), savedLoras);
   mCreativeLorasDirty.store(!saved, std::memory_order_release);
 }
 
