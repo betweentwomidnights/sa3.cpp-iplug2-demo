@@ -32,8 +32,10 @@ It reuses some UI concepts and audio-file handling from [gary4juce](https://gith
 - Shared controls: duration/steps sliders; a seed field (`random`, or lock a seed to reproduce a render); a `shift` dropdown for the sampler distribution shift (`LogSNR`/`Flux`/`Full`/`None`, exposed through `libsa3`); and `bpm` + `key`/scale that get appended to the prompt. BPM follows the host tempo in a DAW and is drag-adjustable in the standalone.
 - The `models` menu can download `medium` or `small-music`, point at an existing model folder, and switch the active variant when both complete model sets are present.
 - LoRAs can be imported and blended (see below).
+- A compact `settings` screen manages the published SAME-L decoder-correction LoRA separately from creative LoRAs, plus peak-normalize and soft-limiter controls. The decoder adapter is remembered but never sent to SAME-S.
+- The status row reserves a small copy icon at the right; hovering the row shows the complete, untruncated status or error and the icon copies that full text to the clipboard.
 - The source waveform lives above the render controls with a `save buffer` button; generated output lives below with play/stop + drag-out. Output auto-saves to `myOutput.wav` after each render, so there's no manual output-save button.
-- The editor uses a tall `420x944` layout so it can sit beside a DAW timeline without consuming as much horizontal space.
+- The editor uses a tall `420x976` layout so it can sit beside a DAW timeline without consuming as much horizontal space.
 
 ## Layout
 
@@ -45,7 +47,9 @@ It reuses some UI concepts and audio-file handling from [gary4juce](https://gith
 
 Paths below use `<sa3.cpp>` for your sa3.cpp checkout (the `SA3_CPP_DIR` you configured — a sibling checkout by default).
 
-The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. `.gguf` files are copied directly. `.safetensors` imports are converted to gguf **in-process by `libsa3` (`sa3_convert_lora`) — no Python needed** — as long as the matching `.json` metadata sits beside them. `.ckpt` imports use that same in-process conversion once an exported `.safetensors`/`.json` pair is found beside the checkpoint or in the parent LoRA folder.
+The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. Imported creative LoRAs, strengths, and enabled states are remembered for new plug-in instances; DAW project/preset state keeps its own selection along with the three prompts and generation controls. Missing saved files are skipped safely. `.gguf` files are copied directly. `.safetensors` imports are converted to gguf **in-process by `libsa3` (`sa3_convert_lora`) — no Python needed**; current exports can carry their metadata internally, while older exports can still use a matching `.json` sidecar. `.ckpt` imports use that same in-process conversion once an exported `.safetensors` file is found beside the checkpoint or in the parent LoRA folder.
+
+The settings screen has a dedicated [SAME-L decoder correction](https://huggingface.co/thepatch/same-l-decoder-lora) slot. `download 11 MB` fetches `squeakfix_v3.safetensors`, converts it locally, selects it at strength `1.0`, and persists the selection. `choose file` accepts a compatible local GGUF or safetensors export. This slot is deliberately separate from the main creative-LoRA list and is gated to the `medium`/SAME-L model family.
 
 Producing that `.safetensors`/`.json` pair from a raw `.ckpt` is the one step that still needs Python (a checkpoint is a PyTorch artifact) — run the helper in `sa3.cpp` once per checkpoint:
 

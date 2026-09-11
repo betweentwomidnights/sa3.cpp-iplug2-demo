@@ -15,6 +15,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -28,6 +29,9 @@
   #include <ShlObj.h>
 #else
   #include <cerrno>
+  #if defined(__APPLE__)
+    #include <dlfcn.h>
+  #endif
   #include <sys/stat.h>
   #include <sys/wait.h>
   #include <unistd.h>
@@ -413,9 +417,9 @@ bool RunProcessAndWait(const std::string& commandLine, const std::string& workDi
 #endif
 }
 
-bool LoraExportPairExists(const std::string& base)
+bool LoraExportExists(const std::string& base)
 {
-  return FileExists(base + ".safetensors") && FileExists(base + ".json");
+  return FileExists(base + ".safetensors");
 }
 
 std::string FindExportedLoraBase(const std::string& path, std::string& error)
@@ -424,9 +428,9 @@ std::string FindExportedLoraBase(const std::string& path, std::string& error)
   const std::string base = WithoutExtension(path);
   if (ext == "safetensors")
   {
-    if (LoraExportPairExists(base))
+    if (LoraExportExists(base))
       return base;
-    error = "safetensors import needs matching " + StemOnly(path) + ".json metadata";
+    error = "safetensors file not found";
     return {};
   }
 
@@ -448,7 +452,7 @@ std::string FindExportedLoraBase(const std::string& path, std::string& error)
     candidates.push_back(JoinPath(dir, NormalizeLoraName(path).c_str()));
 
   for (const std::string& candidate : candidates)
-    if (LoraExportPairExists(candidate))
+    if (LoraExportExists(candidate))
       return candidate;
 
   error = "ckpt import needs exported " + stem + ".safetensors and " + stem + ".json; run tools/lora_ckpt_export.py first";
@@ -474,12 +478,12 @@ std::vector<std::string> LoadPromptPoolForLoraSource(const std::string& sourcePa
   return prompts;
 }
 
-#if defined(_WIN32)
 // Native in-process safetensors->gguf via libsa3's sa3_convert_lora (no Python). Loads sa3.dll from beside
 // this module (same resolution the render path uses). Returns: 1 converted, 0 native unavailable (fall back
 // to Python), -1 native ran but the conversion failed (error set).
 int TryNativeConvertLora(const std::string& exportedBase, const std::string& destination, std::string& error)
 {
+#if defined(_WIN32)
   HMODULE self = nullptr;
   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                           reinterpret_cast<LPCWSTR>(&TryNativeConvertLora), &self))
@@ -501,20 +505,38 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   using ConvFn = int (*)(const char*, const char*, const char*, char*, int);
   auto fn = reinterpret_cast<ConvFn>(GetProcAddress(dll, "sa3_convert_lora"));
   if (!fn) { FreeLibrary(dll); return 0; }   // older sa3.dll without the function
+#elif defined(__APPLE__)
+  Dl_info self = {};
+  if (dladdr(reinterpret_cast<const void*>(&TryNativeConvertLora), &self) == 0 || !self.dli_fname)
+    return 0;
+  const std::string module(self.dli_fname);
+  const size_t slash = module.find_last_of('/');
+  if (slash == std::string::npos) return 0;
+  void* dll = dlopen((module.substr(0, slash) + "/libsa3.dylib").c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (!dll) return 0;
+  using ConvFn = int (*)(const char*, const char*, const char*, char*, int);
+  auto fn = reinterpret_cast<ConvFn>(dlsym(dll, "sa3_convert_lora"));
+  if (!fn) { dlclose(dll); return 0; }
+#else
+  return 0;
+#endif
 
   const std::string safet = exportedBase + ".safetensors";
   const std::string json  = exportedBase + ".json";
   char err[512] = {};
-  const int rc = fn(safet.c_str(), json.c_str(), destination.c_str(), err, (int)sizeof err);
+  const int rc = fn(safet.c_str(), FileExists(json) ? json.c_str() : nullptr,
+                    destination.c_str(), err, (int)sizeof err);
+#if defined(_WIN32)
   FreeLibrary(dll);
+#elif defined(__APPLE__)
+  dlclose(dll);
+#endif
   if (rc != 0) { error = std::string("libsa3 convert: ") + err; return -1; }
   return 1;
 }
-#endif
 
 bool ConvertLoraToGguf(const std::string& exportedBase, const std::string& destination, std::string& error)
 {
-#if defined(_WIN32)
   // Prefer the native in-process converter (no Python); fall back to the .venv script only if unavailable.
   {
     std::string nativeErr;
@@ -527,7 +549,11 @@ bool ConvertLoraToGguf(const std::string& exportedBase, const std::string& desti
     if (native == -1) { error = nativeErr; return false; }   // conversion genuinely failed
     // native == 0: sa3.dll/function unavailable -> fall through to the Python converter
   }
-#endif
+  if (!FileExists(exportedBase + ".json"))
+  {
+    error = "this embedded-metadata LoRA needs a current libsa3 beside the plug-in";
+    return false;
+  }
   const std::string sa3Root = Sa3CppDirectory();
   const std::string script = JoinPath(JoinPath(sa3Root, "tools"), "convert_lora.py");
   if (!FileExists(script))
@@ -1709,6 +1735,12 @@ std::string SettingsPath()
   return documents.empty() ? std::string() : JoinPath(documents, "settings.txt");
 }
 
+std::mutex& SettingsMutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+
 std::string GlobOneInDir(const std::string& dir, const std::string& prefix, const std::string& suffix)
 {
   std::error_code ec;
@@ -1765,6 +1797,7 @@ std::string QuoteWinArg(const std::string& arg)
 
 std::string LoadSetting(const std::string& key)
 {
+  std::lock_guard<std::mutex> lock(SettingsMutex());
   const std::string path = SettingsPath();
   if (path.empty())
     return {};
@@ -1790,6 +1823,7 @@ std::string LoadSetting(const std::string& key)
 
 bool SaveSetting(const std::string& key, const std::string& value)
 {
+  std::lock_guard<std::mutex> lock(SettingsMutex());
   const std::string path = SettingsPath();
   if (path.empty())
     return false;
