@@ -27,6 +27,10 @@ find_package(iPlug2 REQUIRED)
 add_library(sa3_headers INTERFACE)
 target_include_directories(sa3_headers INTERFACE "${SA3_CPP_DIR}/src")
 
+add_library(sa3_ui_theme INTERFACE)
+target_include_directories(sa3_ui_theme INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/Shared")
+target_sources(sa3_ui_theme INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/Shared/SA3UITheme.h")
+
 file(GLOB SA3_RUNTIME_DLLS
   "${SA3_BUILD_DIR}/bin/Release/sa3.dll"
   "${SA3_BUILD_DIR}/bin/Release/ggml*.dll"

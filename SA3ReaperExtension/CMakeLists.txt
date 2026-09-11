@@ -34,6 +34,7 @@ iplug_add_target(${PROJECT_NAME} PUBLIC
     ${IPLUG2_DIR}/Examples/IPlugReaperExtension/resources
   LINK
     ${IGRAPHICS_LIB}
+    sa3_ui_theme
 )
 
 iplug_configure_reaperext(${PROJECT_NAME} ${PROJECT_NAME})

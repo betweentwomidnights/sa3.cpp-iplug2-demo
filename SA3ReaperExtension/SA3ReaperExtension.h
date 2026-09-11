@@ -13,6 +13,9 @@ enum EControlTags
   kCtrlTagSelection,
   kCtrlTagTiming,
   kCtrlTagHint,
+  kCtrlTagTransform,
+  kCtrlTagContinue,
+  kCtrlTagGenerate,
   kNumCtrlTags
 };
 

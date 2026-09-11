@@ -23,6 +23,7 @@ iplug_add_plugin(${PROJECT_NAME}
     resources/fonts/Roboto-Regular.ttf
   LINK
     sa3_headers
+    sa3_ui_theme
     ${SA3_DEMO_PLATFORM_LIBS}
   DEFINES
     SA3_DEMO_DEFAULT_MODELS_DIR="${SA3_CPP_DIR}/models"

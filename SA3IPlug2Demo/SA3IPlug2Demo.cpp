@@ -37,7 +37,7 @@
 
 namespace
 {
-constexpr const char* kDemoFont = "DemoRoboto";
+constexpr const char* kDemoFont = gary::ui::FontName;
 constexpr int kCtrlTagMain = 1000;
 constexpr uint32_t kPluginStateMagic = 0x53334133u; // "SA3" state chunk
 constexpr uint32_t kPluginStateVersion = 1u;
@@ -895,11 +895,7 @@ private:
 
   void DrawTab(IGraphics& g, const IRECT& bounds, const char* label, bool active)
   {
-    using namespace gary::ui;
-    g.FillRoundRect(active ? Red() : ButtonFill(), bounds, 4.f);
-    g.DrawRoundRect(active ? Red() : Frame(), bounds, 4.f);
-    g.DrawText(IText(13.f, active ? COLOR_BLACK : COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle),
-               label, bounds.GetPadded(-4.f));
+    gary::ui::DrawTab(g, bounds, label, kDemoFont, active);
   }
 
   void DrawTabs(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)

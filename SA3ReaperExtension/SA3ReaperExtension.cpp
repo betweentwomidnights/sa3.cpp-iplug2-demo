@@ -7,25 +7,65 @@
 #include <cstring>
 
 #include "IControls.h"
+#include "SA3UITheme.h"
 #include "roboto.hpp"
 
 namespace
 {
-const IColor kBackground = IColor(255, 24, 26, 31);
-const IColor kPanel = IColor(255, 35, 38, 45);
-const IColor kText = IColor(255, 229, 231, 235);
-const IColor kMutedText = IColor(255, 164, 169, 180);
-const IColor kAccent = IColor(255, 113, 90, 236);
-
-IVStyle ButtonStyle()
+class SA3BackgroundControl final : public IControl
 {
-  return DEFAULT_STYLE
-    .WithColor(kBG, kPanel)
-    .WithColor(kFG, kAccent)
-    .WithColor(kPR, kAccent)
-    .WithColor(kFR, IColor(255, 73, 77, 89))
-    .WithLabelText(IText(14.f, kText, "Roboto-Regular", EAlign::Center, EVAlign::Middle));
-}
+public:
+  explicit SA3BackgroundControl(const IRECT& bounds)
+  : IControl(bounds)
+  {
+    mIgnoreMouse = true;
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    g.FillRect(gary::ui::Background(), mRECT);
+    const IRECT shell = mRECT.GetPadded(-8.f);
+    g.FillRoundRect(gary::ui::Panel(), shell, 7.f);
+    g.DrawRoundRect(gary::ui::Frame(), shell, 7.f);
+  }
+};
+
+class SA3TabControl final : public IControl
+{
+public:
+  SA3TabControl(const IRECT& bounds, const char* label, bool active, std::function<void()> action)
+  : IControl(bounds)
+  , mLabel(label)
+  , mActive(active)
+  , mAction(std::move(action))
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    gary::ui::DrawTab(g, mRECT, mLabel.c_str(), gary::ui::FontName, mActive);
+  }
+
+  void OnMouseDown(float, float, const IMouseMod&) override
+  {
+    if (mAction)
+      mAction();
+  }
+
+  void SetActive(bool active)
+  {
+    if (mActive != active)
+    {
+      mActive = active;
+      SetDirty(false);
+    }
+  }
+
+private:
+  std::string mLabel;
+  bool mActive = false;
+  std::function<void()> mAction;
+};
 
 bool NearlyEqual(double lhs, double rhs)
 {
@@ -94,17 +134,17 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
     const IRECT hint = content.GetFromBottom(92.f);
     const float gap = 7.f;
     const float buttonWidth = (tabs.W() - gap * 2.f) / 3.f;
-    const IRECT transformButton = tabs.GetFromLeft(buttonWidth);
-    const IRECT continueButton = tabs.GetFromLeft(buttonWidth * 2.f + gap).GetFromRight(buttonWidth);
-    const IRECT generateButton = tabs.GetFromRight(buttonWidth);
+    const IRECT generateButton = tabs.GetFromLeft(buttonWidth);
+    const IRECT transformButton = tabs.GetFromLeft(buttonWidth * 2.f + gap).GetFromRight(buttonWidth);
+    const IRECT continueButton = tabs.GetFromRight(buttonWidth);
 
     if (graphics->NControls())
     {
       graphics->GetControl(0)->SetTargetAndDrawRECTs(bounds);
       graphics->GetControl(1)->SetTargetAndDrawRECTs(title);
-      graphics->GetControl(2)->SetTargetAndDrawRECTs(transformButton);
-      graphics->GetControl(3)->SetTargetAndDrawRECTs(continueButton);
-      graphics->GetControl(4)->SetTargetAndDrawRECTs(generateButton);
+      graphics->GetControl(2)->SetTargetAndDrawRECTs(generateButton);
+      graphics->GetControl(3)->SetTargetAndDrawRECTs(transformButton);
+      graphics->GetControl(4)->SetTargetAndDrawRECTs(continueButton);
       graphics->GetControl(5)->SetTargetAndDrawRECTs(selection);
       graphics->GetControl(6)->SetTargetAndDrawRECTs(timing);
       graphics->GetControl(7)->SetTargetAndDrawRECTs(hint);
@@ -112,25 +152,28 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
     }
 
     graphics->SetLayoutOnResize(true);
-    if (!graphics->LoadFont("Roboto-Regular", (void*) ROBOTO_REGULAR, ROBOTO_REGULAR_length))
-      graphics->LoadFont("Roboto-Regular", "Arial", ETextStyle::Normal);
+    if (!graphics->LoadFont(gary::ui::FontName, (void*) ROBOTO_REGULAR, ROBOTO_REGULAR_length))
+      graphics->LoadFont(gary::ui::FontName, "Arial", ETextStyle::Normal);
 
-    graphics->AttachPanelBackground(kBackground);
-    graphics->AttachControl(new ITextControl(title, "SA3 FOR REAPER · TRANSFORM",
-      IText(22.f, kText, "Roboto-Regular", EAlign::Near, EVAlign::Middle)), kCtrlTagOperation);
-    graphics->AttachControl(new IVButtonControl(transformButton,
-      [this](IControl*) { SelectOperation(Operation::Transform); }, "TRANSFORM", ButtonStyle()));
-    graphics->AttachControl(new IVButtonControl(continueButton,
-      [this](IControl*) { SelectOperation(Operation::Continue); }, "CONTINUE", ButtonStyle()));
-    graphics->AttachControl(new IVButtonControl(generateButton,
-      [this](IControl*) { SelectOperation(Operation::Generate); }, "GENERATE", ButtonStyle()));
+    graphics->AttachControl(new SA3BackgroundControl(bounds));
+    graphics->AttachControl(new ITextControl(title, "sa3 / REAPER",
+      IText(gary::ui::TitleTextSize, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle)),
+      kCtrlTagOperation);
+    graphics->AttachControl(new SA3TabControl(generateButton, "generate", false,
+      [this]() { SelectOperation(Operation::Generate); }), kCtrlTagGenerate);
+    graphics->AttachControl(new SA3TabControl(transformButton, "transform", true,
+      [this]() { SelectOperation(Operation::Transform); }), kCtrlTagTransform);
+    graphics->AttachControl(new SA3TabControl(continueButton, "continue", false,
+      [this]() { SelectOperation(Operation::Continue); }), kCtrlTagContinue);
     graphics->AttachControl(new IMultiLineTextControl(selection, "No media item selected",
-      IText(17.f, kText, "Roboto-Regular", EAlign::Near, EVAlign::Middle)), kCtrlTagSelection);
+      IText(17.f, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle)), kCtrlTagSelection);
     graphics->AttachControl(new ITextControl(timing, "Time selection: none",
-      IText(14.f, kMutedText, "Roboto-Regular", EAlign::Near, EVAlign::Middle)), kCtrlTagTiming);
+      IText(gary::ui::BodyTextSize, gary::ui::TextDim(), gary::ui::FontName, EAlign::Near, EVAlign::Middle)),
+      kCtrlTagTiming);
     graphics->AttachControl(new IMultiLineTextControl(hint,
       "Select an audio item, then choose Transform or Continue.\nChoose Generate to use the REAPER time selection.",
-      IText(14.f, kMutedText, "Roboto-Regular", EAlign::Near, EVAlign::Top)), kCtrlTagHint);
+      IText(gary::ui::BodyTextSize, gary::ui::TextDim(), gary::ui::FontName, EAlign::Near, EVAlign::Top)),
+      kCtrlTagHint);
 
     RefreshPanel(true);
   };
@@ -253,34 +296,36 @@ void SA3ReaperExtension::RefreshPanel(bool force)
   }
 
   const char* hint = nullptr;
-  const char* operationTitle = nullptr;
   const bool hasSingleAudioItem = current.itemCount == 1 && current.firstTakeIsAudio;
   switch (mOperation)
   {
     case Operation::Transform:
-      operationTitle = "SA3 FOR REAPER · TRANSFORM";
       hint = hasSingleAudioItem
         ? "Ready for the Transform workflow. Rendering controls come next."
         : "Transform will initially require exactly one selected audio item.";
       break;
     case Operation::Continue:
-      operationTitle = "SA3 FOR REAPER · CONTINUE";
       hint = hasSingleAudioItem
         ? "Ready for the continuation-splice workflow. Rendering controls come next."
         : "Continue will initially require exactly one selected audio item.";
       break;
     case Operation::Generate:
-      operationTitle = "SA3 FOR REAPER · GENERATE";
       hint = timeLength > 0.0001
         ? "Ready to generate into the selected time range. Rendering controls come next."
         : "Set a REAPER time selection to choose the generated audio duration.";
       break;
   }
 
-  SetTaggedText(kCtrlTagOperation, operationTitle);
   SetTaggedText(kCtrlTagSelection, selectionText);
   SetTaggedText(kCtrlTagTiming, timingText);
   SetTaggedText(kCtrlTagHint, hint);
+
+  if (IControl* control = ui->GetControlWithTag(kCtrlTagTransform))
+    control->As<SA3TabControl>()->SetActive(mOperation == Operation::Transform);
+  if (IControl* control = ui->GetControlWithTag(kCtrlTagContinue))
+    control->As<SA3TabControl>()->SetActive(mOperation == Operation::Continue);
+  if (IControl* control = ui->GetControlWithTag(kCtrlTagGenerate))
+    control->As<SA3TabControl>()->SetActive(mOperation == Operation::Generate);
 }
 
 void SA3ReaperExtension::SetTaggedText(int tag, const char* text)
