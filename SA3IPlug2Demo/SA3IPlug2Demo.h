@@ -2,7 +2,7 @@
 
 #include "DemoAudioFileStore.h"
 #include "IPlug_include_in_plug_hdr.h"
-#include "libsa3.h"
+#include "libsa3_v1.h"
 
 #include <algorithm>
 #include <array>

@@ -144,27 +144,21 @@ std::vector<float> ToPlanar(const gary::RecordingSnapshot& snapshot)
 
 struct Sa3Api
 {
-  using InitFn = sa3_context* (*)(const sa3_config*, char*, int);
-  using GenerateExFn = int (*)(sa3_context*, const sa3_request_ex*, sa3_audio*, char*, int);
-  using FreeAudioFn = void (*)(sa3_audio*);
-  using FreeContextFn = void (*)(sa3_context*);
+  using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
 
 #ifdef _WIN32
   HMODULE module = nullptr;
 #elif defined(__APPLE__)
   void* module = nullptr;
 #endif
-  InitFn init = nullptr;
-  GenerateExFn generateEx = nullptr;
-  FreeAudioFn freeAudio = nullptr;
-  FreeContextFn freeContext = nullptr;
+  const sa3_api_v1* api = nullptr;
 
   bool Ready() const noexcept
   {
 #ifdef _WIN32
-    return module && init && generateEx && freeAudio && freeContext;
+    return module && api;
 #elif defined(__APPLE__)
-    return module && init && generateEx && freeAudio && freeContext;
+    return module && api;
 #else
     return false;
 #endif
@@ -188,14 +182,14 @@ struct Sa3Api
       return false;
     }
 
-    if (!Resolve(init, "sa3_init", error) ||
-        !Resolve(generateEx, "sa3_generate_ex", error) ||
-        !Resolve(freeAudio, "sa3_free_audio", error) ||
-        !Resolve(freeContext, "sa3_free", error))
+    GetApiFn getApi = nullptr;
+    if (!Resolve(getApi, "sa3_get_api", error)) return false;
+    api = getApi(SA3_ABI_VERSION_1);
+    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < sizeof(sa3_api_v1))
     {
+      error = "libsa3 does not provide the complete C ABI V1 table";
       return false;
     }
-
     return true;
 #elif defined(__APPLE__)
     const std::string dir = ModuleDirectory(error);
@@ -211,14 +205,14 @@ struct Sa3Api
       return false;
     }
 
-    if (!Resolve(init, "sa3_init", error) ||
-        !Resolve(generateEx, "sa3_generate_ex", error) ||
-        !Resolve(freeAudio, "sa3_free_audio", error) ||
-        !Resolve(freeContext, "sa3_free", error))
+    GetApiFn getApi = nullptr;
+    if (!Resolve(getApi, "sa3_get_api", error)) return false;
+    api = getApi(SA3_ABI_VERSION_1);
+    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < sizeof(sa3_api_v1))
     {
+      error = "libsa3 does not provide the complete C ABI V1 table";
       return false;
     }
-
     return true;
 #else
     error = "runtime libsa3 loading is only implemented for Windows/macOS in this demo";
@@ -1872,7 +1866,7 @@ void SA3IPlug2Demo::TeardownContext()
   if (mContext)
   {
     if (const Sa3Api* sa3 = LoadedSa3Api())
-      sa3->freeContext(mContext);
+      sa3->api->context_destroy(mContext);
     mContext = nullptr;
   }
 }
@@ -3006,24 +3000,28 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     return;
   }
 
-  char err[1024] = {};
+  sa3_error_v1 error = {};
+  error.size = sizeof(error);
+  sa3->api->error_init(&error);
   if (!mContext)
   {
     SetStatus("loading libsa3 model (" + input.variant + ")");
-    sa3_config cfg = {};
+    sa3_context_config_v1 cfg = {};
+    cfg.size = sizeof(cfg);
+    sa3->api->context_config_init(&cfg);
     const std::string models = ModelsDir();
     cfg.models_dir = models.c_str();
     cfg.variant = input.variant.c_str();
-    cfg.encoding = "f16";
-    mContext = sa3->init(&cfg, err, (int)sizeof err);
-    if (!mContext)
+    cfg.dit_encoding = "f16";
+    const sa3_status_v1 loadStatus = sa3->api->context_create(&cfg, &mContext, &error);
+    if (loadStatus != SA3_STATUS_OK_V1)
     {
-      finish(std::string("sa3_init failed: ") + err);
+      finish(std::string("sa3 context failed: ") + error.message);
       return;
     }
     if (cancelled())
     {
-      sa3->freeContext(mContext);
+      sa3->api->context_destroy(mContext);
       mContext = nullptr;
       mCancelRequested.store(false, std::memory_order_release);
       finish("render cancelled", true);
@@ -3034,72 +3032,71 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   gary::RecordingSnapshot source = SourceSnapshotForSA3(input);
   std::vector<float> planar = ToPlanar(source);
 
-  // Loop mode (Text only): generate loop_duration + a little pad with NO schedule ending, then trim to the
-  // exact bar length in the plugin. libsa3 has no target_n_samp, so this mirrors sa3-server /generate/loop
-  // demo-side (frames carry the pad; duration_padding_sec=0). loopTargetSamples>0 requests the front trim.
-  int loopTargetSamples = 0;
-  double genSeconds = (double)input.durationSeconds;
+  // Loop mode asks V1 for the exact bar length and gives the model two seconds of tail headroom.
+  double outputSeconds = (double)input.durationSeconds;
+  float generationTailSeconds = 6.0f;
   if (input.mode == RenderMode::Text && input.loopBars > 0 && input.bpm > 0.0)
   {
     const double secondsPerBar = (60.0 / input.bpm) * 4.0;   // 4/4
-    const double loopSeconds = secondsPerBar * (double)input.loopBars;
-    genSeconds = loopSeconds + 2.0;                          // ~2s headroom, trimmed away below
-    loopTargetSamples = std::max(1, (int)std::llround(loopSeconds * 44100.0));
+    outputSeconds = secondsPerBar * (double)input.loopBars;
+    generationTailSeconds = 2.0f;
   }
 
-  sa3_request_ex req = {};
-  req.request.prompt = input.prompt.c_str();
-  int frames = std::max(1, (int)(genSeconds * 44100.0 / 4096.0 + 0.5));
-  if (input.variant == "small-music" || input.variant == "small-sfx")
-    frames = std::max(2, frames & ~1);   // SAME-S needs an even frame count
-  req.request.frames = frames;
-  req.request.steps = input.steps;
-  req.request.seed = input.useSeed ? input.seed : -1;
-  req.request.cfg_scale = input.cfgScale;
-  req.request.duration_padding_sec = (input.mode == RenderMode::Text && loopTargetSamples == 0) ? 6.0f : 0.0f;
-  req.request.keep_models = 0;
-  req.request.loudness.set = 1;
-  req.request.loudness.peak_normalize = input.peakNormalize ? 1 : 0;
-  req.request.loudness.peak_normalize_db = input.peakNormalizeDb;
-  req.request.loudness.limiter = input.limiter ? 1 : 0;
-  req.request.loudness.limiter_ceiling_db = input.limiterCeilingDb;
-  req.request.loudness.limiter_knee = input.limiterKnee;
+  sa3_request_v1 req = {};
+  req.size = sizeof(req);
+  sa3->api->request_init(&req);
+  req.operation = input.mode == RenderMode::Transform ? SA3_OPERATION_TRANSFORM_V1
+                : input.mode == RenderMode::Continue ? SA3_OPERATION_CONTINUE_V1
+                                                      : SA3_OPERATION_GENERATE_V1;
+  req.prompt = input.prompt.c_str();
+  req.duration_seconds = outputSeconds;
+  req.steps = input.steps;
+  req.seed = input.useSeed ? input.seed : -1;
+  req.cfg_scale = input.cfgScale;
+  req.generation_tail_padding_seconds = generationTailSeconds;
+  req.residency = SA3_RESIDENCY_FRUGAL_V1;
+  req.loudness.peak_normalize = input.peakNormalize ? 1 : 0;
+  req.loudness.peak_normalize_db = input.peakNormalizeDb;
+  req.loudness.limiter = input.limiter ? 1 : 0;
+  req.loudness.limiter_ceiling_db = input.limiterCeilingDb;
+  req.loudness.limiter_knee = input.limiterKnee;
   // Intentionally not user-facing: these neutral values keep latent-domain controls out of this VST3.
-  req.request.loudness.latent_rescale = 1.0f;
-  req.request.loudness.latent_shift = 0.0f;
-  static const char* kDistShiftNames[4] = {"LogSNR", "Flux", "Full", "None"};   // static: outlives the call
-  req.request.dist_shift = kDistShiftNames[std::clamp(input.distShift, 0, 3)];   // params[4] stay 0 -> type defaults
+  req.loudness.latent_rescale = 1.0f;
+  req.loudness.latent_shift = 0.0f;
+  req.distribution_shift = static_cast<sa3_distribution_shift_v1>(std::clamp(input.distShift, 0, 3));
   req.encode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
   req.encode_overlap = 32;
   req.decode_chunk_size = 128;
   req.decode_overlap = 32;
 
-  std::vector<const char*> loraNames;
-  std::vector<float> loraStrengths;
-  loraNames.reserve(input.loras.size());
-  loraStrengths.reserve(input.loras.size());
+  std::vector<sa3_adapter_v1> adapters;
+  adapters.reserve(input.loras.size());
   for (const auto& lora : input.loras)
   {
-    loraNames.push_back(lora.path.c_str());
-    loraStrengths.push_back(lora.strength);
+    sa3_adapter_v1 adapter = {};
+    adapter.size = sizeof(adapter);
+    sa3->api->adapter_init(&adapter);
+    adapter.path_or_name = lora.path.c_str();
+    adapter.strength = lora.strength;
+    adapters.push_back(adapter);
   }
-  req.request.n_loras = (int)loraNames.size();
-  req.request.lora_names = loraNames.empty() ? nullptr : loraNames.data();
-  req.request.lora_strengths = loraStrengths.empty() ? nullptr : loraStrengths.data();
+  req.adapters = adapters.empty() ? nullptr : adapters.data();
+  req.adapter_count = static_cast<uint32_t>(adapters.size());
 
   struct ProgressUser { SA3IPlug2Demo* self; uint64_t requestId; } progressUser{this, requestId};
-  req.request.user = &progressUser;
-  req.request.on_progress = [](void* user, const char* stage, int step, int total, float fraction) {
+  req.callback_user = &progressUser;
+  req.on_progress = [](void* user, const sa3_progress_v1* update) {
     auto* u = static_cast<ProgressUser*>(user);
-    if (!u || u->requestId != u->self->mRequestId.load(std::memory_order_acquire))
+    if (!u || !update || u->requestId != u->self->mRequestId.load(std::memory_order_acquire))
       return;
-    u->self->mProgress.store(fraction, std::memory_order_release);
+    u->self->mProgress.store(update->fraction, std::memory_order_release);
     char text[160] = {};
-    std::snprintf(text, sizeof text, "%s %d/%d %.0f%%", stage ? stage : "render", step, total, fraction * 100.0f);
+    std::snprintf(text, sizeof text, "%s %d/%d %.0f%%",
+                  update->stage_name ? update->stage_name : "render",
+                  update->step, update->total, update->fraction * 100.0f);
     u->self->SetStatus(text);
   };
-  req.cancel_user = &progressUser;
-  req.should_cancel = [](void* user) -> int {
+  req.should_cancel = [](void* user) -> int32_t {
     auto* u = static_cast<ProgressUser*>(user);
     if (!u || !u->self)
       return 1;
@@ -3109,48 +3106,47 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
 
   if (input.mode == RenderMode::Transform)
   {
-    req.init_audio.mode = SA3_INIT_AUDIO_A2A;
-    req.init_audio.samples = planar.data();
-    req.init_audio.n_samp = source.numSamples;
-    req.init_audio.n_ch = (int)source.channels.size();
-    req.init_audio.sample_rate = source.sampleRate;
-    req.init_audio.init_noise_level = input.initNoiseLevel;
+    req.input_audio.samples = planar.data();
+    req.input_audio.n_samples = static_cast<uint64_t>(source.numSamples);
+    req.input_audio.n_channels = static_cast<uint32_t>(source.channels.size());
+    req.input_audio.sample_rate = static_cast<uint32_t>(source.sampleRate);
+    req.transform_noise_level = input.initNoiseLevel;
   }
   else if (input.mode == RenderMode::Continue)
   {
     const float sourceSeconds = source.numSamples > 0 ? (float)source.numSamples / std::max(1, source.sampleRate) : 0.f;
     const float totalSeconds = std::max((float)input.durationSeconds, sourceSeconds + 4.0f);
-    req.init_audio.mode = SA3_INIT_AUDIO_INPAINT;
-    req.init_audio.samples = planar.data();
-    req.init_audio.n_samp = source.numSamples;
-    req.init_audio.n_ch = (int)source.channels.size();
-    req.init_audio.sample_rate = source.sampleRate;
-    req.init_audio.inpaint_start = sourceSeconds;
-    req.init_audio.inpaint_end = totalSeconds;
+    req.duration_seconds = totalSeconds - sourceSeconds;
+    req.input_audio.samples = planar.data();
+    req.input_audio.n_samples = static_cast<uint64_t>(source.numSamples);
+    req.input_audio.n_channels = static_cast<uint32_t>(source.channels.size());
+    req.input_audio.sample_rate = static_cast<uint32_t>(source.sampleRate);
   }
 
   SetStatus(input.mode == RenderMode::Text ? "generating text audio"
             : input.mode == RenderMode::Transform ? "transforming source"
                                             : "continuing source");
-  sa3_audio audio = {};
-  const int rc = sa3->generateEx(mContext, &req, &audio, err, (int)sizeof err);
-  if (rc != 0)
+  sa3_result_v1 audio = {};
+  audio.size = sizeof(audio);
+  sa3->api->result_init(&audio);
+  const sa3_status_v1 status = sa3->api->generate(mContext, &req, &audio, &error);
+  if (status != SA3_STATUS_OK_V1)
   {
-    if (cancelled())
+    if (status == SA3_STATUS_CANCELLED_V1 || cancelled())
     {
       mCancelRequested.store(false, std::memory_order_release);
       finish("render cancelled", true);
     }
     else
     {
-      finish(std::string("sa3 failed: ") + err);
+      finish(std::string("sa3 failed: ") + error.message);
     }
     return;
   }
 
   if (cancelled())
   {
-    sa3->freeAudio(&audio);
+    sa3->api->result_free(&audio);
     mCancelRequested.store(false, std::memory_order_release);
     finish("render cancelled", true);
     return;
@@ -3158,10 +3154,9 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
 
   mLastSeed.store(RequestableSeed(audio.seed), std::memory_order_release);
   mHasLastSeed.store(true, std::memory_order_release);
-  // Loop mode: trim the padded generation back to the exact bar length (native rate is 44100).
-  const int keepSamples = (loopTargetSamples > 0) ? std::min(loopTargetSamples, audio.n_samp) : -1;
-  InstallOutputFromPlanar(audio.samples, audio.n_samp, audio.n_ch, audio.sample_rate, keepSamples);
-  sa3->freeAudio(&audio);
+  InstallOutputFromPlanar(audio.samples, static_cast<int>(audio.n_samples),
+                          static_cast<int>(audio.n_channels), static_cast<int>(audio.sample_rate));
+  sa3->api->result_free(&audio);
   SaveOutputToDisk();
   finish("render complete");
 }

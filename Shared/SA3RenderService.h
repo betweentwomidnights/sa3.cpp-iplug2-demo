@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DemoAudioFileStore.h"
-#include "libsa3.h"
+#include "libsa3_v1.h"
 
 #include <atomic>
 #include <cstdint>

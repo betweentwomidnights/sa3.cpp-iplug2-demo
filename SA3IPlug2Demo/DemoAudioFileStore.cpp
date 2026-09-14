@@ -1,4 +1,5 @@
 #include "DemoAudioFileStore.h"
+#include "libsa3_v1.h"
 
 #define DR_MP3_IMPLEMENTATION
 #include "vendor/dr_libs/dr_mp3.h"
@@ -478,7 +479,7 @@ std::vector<std::string> LoadPromptPoolForLoraSource(const std::string& sourcePa
   return prompts;
 }
 
-// Native in-process safetensors->gguf via libsa3's sa3_convert_lora (no Python). Loads sa3.dll from beside
+// Native in-process safetensors->gguf via libsa3's V1 table (no Python). Loads sa3.dll from beside
 // this module (same resolution the render path uses). Returns: 1 converted, 0 native unavailable (fall back
 // to Python), -1 native ran but the conversion failed (error set).
 int TryNativeConvertLora(const std::string& exportedBase, const std::string& destination, std::string& error)
@@ -502,9 +503,10 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
   if (!dll)
     return 0;
-  using ConvFn = int (*)(const char*, const char*, const char*, char*, int);
-  auto fn = reinterpret_cast<ConvFn>(GetProcAddress(dll, "sa3_convert_lora"));
-  if (!fn) { FreeLibrary(dll); return 0; }   // older sa3.dll without the function
+  using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
+  auto getApi = reinterpret_cast<GetApiFn>(GetProcAddress(dll, "sa3_get_api"));
+  const sa3_api_v1* api = getApi ? getApi(SA3_ABI_VERSION_1) : nullptr;
+  if (!api || api->size < sizeof(sa3_api_v1)) { FreeLibrary(dll); return 0; }
 #elif defined(__APPLE__)
   Dl_info self = {};
   if (dladdr(reinterpret_cast<const void*>(&TryNativeConvertLora), &self) == 0 || !self.dli_fname)
@@ -514,24 +516,32 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   if (slash == std::string::npos) return 0;
   void* dll = dlopen((module.substr(0, slash) + "/libsa3.dylib").c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!dll) return 0;
-  using ConvFn = int (*)(const char*, const char*, const char*, char*, int);
-  auto fn = reinterpret_cast<ConvFn>(dlsym(dll, "sa3_convert_lora"));
-  if (!fn) { dlclose(dll); return 0; }
+  using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
+  auto getApi = reinterpret_cast<GetApiFn>(dlsym(dll, "sa3_get_api"));
+  const sa3_api_v1* api = getApi ? getApi(SA3_ABI_VERSION_1) : nullptr;
+  if (!api || api->size < sizeof(sa3_api_v1)) { dlclose(dll); return 0; }
 #else
   return 0;
 #endif
 
   const std::string safet = exportedBase + ".safetensors";
   const std::string json  = exportedBase + ".json";
-  char err[512] = {};
-  const int rc = fn(safet.c_str(), FileExists(json) ? json.c_str() : nullptr,
-                    destination.c_str(), err, (int)sizeof err);
+  sa3_lora_convert_v1 options = {};
+  options.size = sizeof(options);
+  api->lora_convert_init(&options);
+  options.safetensors_path = safet.c_str();
+  options.json_path = FileExists(json) ? json.c_str() : nullptr;
+  options.output_gguf_path = destination.c_str();
+  sa3_error_v1 abiError = {};
+  abiError.size = sizeof(abiError);
+  api->error_init(&abiError);
+  const sa3_status_v1 status = api->convert_lora(&options, &abiError);
 #if defined(_WIN32)
   FreeLibrary(dll);
 #elif defined(__APPLE__)
   dlclose(dll);
 #endif
-  if (rc != 0) { error = std::string("libsa3 convert: ") + err; return -1; }
+  if (status != SA3_STATUS_OK_V1) { error = std::string("libsa3 convert: ") + abiError.message; return -1; }
   return 1;
 }
 
