@@ -506,7 +506,7 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
   auto getApi = reinterpret_cast<GetApiFn>(GetProcAddress(dll, "sa3_get_api"));
   const sa3_api_v1* api = getApi ? getApi(SA3_ABI_VERSION_1) : nullptr;
-  if (!api || api->size < sizeof(sa3_api_v1)) { FreeLibrary(dll); return 0; }
+  if (!api || api->size < SA3_API_V1_MIN_SIZE) { FreeLibrary(dll); return 0; }
 #elif defined(__APPLE__)
   Dl_info self = {};
   if (dladdr(reinterpret_cast<const void*>(&TryNativeConvertLora), &self) == 0 || !self.dli_fname)
@@ -519,7 +519,7 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
   auto getApi = reinterpret_cast<GetApiFn>(dlsym(dll, "sa3_get_api"));
   const sa3_api_v1* api = getApi ? getApi(SA3_ABI_VERSION_1) : nullptr;
-  if (!api || api->size < sizeof(sa3_api_v1)) { dlclose(dll); return 0; }
+  if (!api || api->size < SA3_API_V1_MIN_SIZE) { dlclose(dll); return 0; }
 #else
   return 0;
 #endif

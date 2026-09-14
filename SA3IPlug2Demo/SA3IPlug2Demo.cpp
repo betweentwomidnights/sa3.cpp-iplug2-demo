@@ -185,7 +185,7 @@ struct Sa3Api
     GetApiFn getApi = nullptr;
     if (!Resolve(getApi, "sa3_get_api", error)) return false;
     api = getApi(SA3_ABI_VERSION_1);
-    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < sizeof(sa3_api_v1))
+    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < SA3_API_V1_MIN_SIZE)
     {
       error = "libsa3 does not provide the complete C ABI V1 table";
       return false;
@@ -208,7 +208,7 @@ struct Sa3Api
     GetApiFn getApi = nullptr;
     if (!Resolve(getApi, "sa3_get_api", error)) return false;
     api = getApi(SA3_ABI_VERSION_1);
-    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < sizeof(sa3_api_v1))
+    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < SA3_API_V1_MIN_SIZE)
     {
       error = "libsa3 does not provide the complete C ABI V1 table";
       return false;
