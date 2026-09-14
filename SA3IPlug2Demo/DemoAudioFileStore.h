@@ -96,6 +96,8 @@ AudioFileInfo SaveOutputWav(const RecordingSnapshot& snapshot);
 AudioFileInfo SaveWavFile(const std::string& path, const RecordingSnapshot& snapshot);
 AudioFileInfo SaveOutputBase64Audio(const std::string& base64Audio);
 AudioFileInfo ImportLoraFile(const std::string& path);
+std::vector<std::string> LoadPromptPoolForLora(const std::string& sourcePath,
+                                               const std::string& displayName = {});
 std::vector<std::string> LoadDefaultPromptPool();
 bool OutputUndoAvailable();
 AudioFileInfo RestoreOutputUndo();

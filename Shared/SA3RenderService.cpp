@@ -46,6 +46,30 @@ int64_t RequestableSeed(uint64_t seed)
   return static_cast<int64_t>(seed & static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
 }
 
+const char* OperationName(SA3RenderOperation operation)
+{
+  switch (operation)
+  {
+    case SA3RenderOperation::Transform: return "transform";
+    case SA3RenderOperation::Continue: return "continuation";
+    default: return "generation";
+  }
+}
+
+std::vector<float> ToPlanar(const RecordingSnapshot& audio)
+{
+  const int channels = static_cast<int>(audio.channels.size());
+  const int samples = std::max(0, audio.numSamples);
+  std::vector<float> planar(static_cast<size_t>(channels) * samples, 0.f);
+  for (int channel = 0; channel < channels; ++channel)
+  {
+    const size_t available = std::min(static_cast<size_t>(samples), audio.channels[static_cast<size_t>(channel)].size());
+    std::copy_n(audio.channels[static_cast<size_t>(channel)].data(), available,
+                planar.data() + static_cast<size_t>(channel) * samples);
+  }
+  return planar;
+}
+
 struct Sa3Api
 {
   using InitFn = sa3_context* (*)(const sa3_config*, char*, int);
@@ -206,12 +230,14 @@ const Sa3Api* LoadedSa3Api()
 }
 }
 
-SA3TextGenerationRequest LoadSharedTextGenerationRequest(std::string prompt,
-                                                         double durationSeconds,
-                                                         double bpm)
+SA3RenderRequest LoadSharedRenderRequest(std::string prompt,
+                                         double durationSeconds,
+                                         double bpm,
+                                         SA3RenderOperation operation)
 {
-  SA3TextGenerationRequest request;
-  request.durationSeconds = std::clamp(durationSeconds, 1.0, 300.0);
+  SA3RenderRequest request;
+  request.operation = operation;
+  request.durationSeconds = durationSeconds;
   request.bpm = bpm;
 
   const std::string savedModelsDir = LoadSetting("models_dir");
@@ -253,12 +279,38 @@ SA3TextGenerationRequest LoadSharedTextGenerationRequest(std::string prompt,
   return request;
 }
 
-bool ValidateTextGenerationRequest(const SA3TextGenerationRequest& request, std::string& error)
+bool ValidateRenderRequest(const SA3RenderRequest& request, std::string& error)
 {
   if (request.durationSeconds < 1.0 || request.durationSeconds > 300.0)
   {
-    error = "generation duration must be between 1 and 300 seconds";
+    error = std::string(OperationName(request.operation)) + " duration must be between 1 and 300 seconds";
     return false;
+  }
+  if (request.operation != SA3RenderOperation::Generate)
+  {
+    if (request.sourceAudio.numSamples <= 0 || request.sourceAudio.sampleRate <= 0
+        || request.sourceAudio.channels.empty())
+    {
+      error = std::string(OperationName(request.operation)) + " needs captured source audio";
+      return false;
+    }
+    for (const auto& channel : request.sourceAudio.channels)
+    {
+      if (channel.size() < static_cast<size_t>(request.sourceAudio.numSamples))
+      {
+        error = "captured source audio is incomplete";
+        return false;
+      }
+    }
+    const double sourceSeconds = static_cast<double>(request.sourceAudio.numSamples)
+                               / request.sourceAudio.sampleRate;
+    const double outputSeconds = request.operation == SA3RenderOperation::Continue
+      ? sourceSeconds + request.durationSeconds : sourceSeconds;
+    if (outputSeconds > 300.0)
+    {
+      error = std::string(OperationName(request.operation)) + " output would exceed 300 seconds";
+      return false;
+    }
   }
   if (request.modelsDir.empty())
   {
@@ -288,7 +340,7 @@ SA3RenderService::~SA3RenderService()
   TeardownContext();
 }
 
-bool SA3RenderService::StartTextGeneration(SA3TextGenerationRequest request)
+bool SA3RenderService::StartRender(SA3RenderRequest request)
 {
   if (mBusy.exchange(true, std::memory_order_acq_rel))
     return false;
@@ -297,7 +349,7 @@ bool SA3RenderService::StartTextGeneration(SA3TextGenerationRequest request)
     mWorker.join();
 
   std::string error;
-  if (!ValidateTextGenerationRequest(request, error))
+  if (!ValidateRenderRequest(request, error))
   {
     mBusy.store(false, std::memory_order_release);
     SetStatus(error);
@@ -311,7 +363,7 @@ bool SA3RenderService::StartTextGeneration(SA3TextGenerationRequest request)
   mCancelRequested.store(false, std::memory_order_release);
   mProgress.store(0.f, std::memory_order_release);
   const uint64_t requestId = mRequestId.fetch_add(1, std::memory_order_acq_rel) + 1;
-  SetStatus("queued generation");
+  SetStatus(std::string("queued ") + OperationName(request.operation));
   mWorker = std::thread([this, requestId, request = std::move(request)]() mutable {
     WorkerMain(requestId, std::move(request));
   });
@@ -323,7 +375,7 @@ void SA3RenderService::Cancel()
   if (!Busy())
     return;
   mCancelRequested.store(true, std::memory_order_release);
-  SetStatus("cancelling generation");
+  SetStatus("cancelling render");
 }
 
 std::string SA3RenderService::Status() const
@@ -343,7 +395,7 @@ bool SA3RenderService::TakeCompletedResult(SA3RenderResult& result)
   return true;
 }
 
-void SA3RenderService::WorkerMain(uint64_t requestId, SA3TextGenerationRequest request)
+void SA3RenderService::WorkerMain(uint64_t requestId, SA3RenderRequest request)
 {
   auto cancelled = [&]() {
     return mCancelRequested.load(std::memory_order_acquire)
@@ -381,20 +433,40 @@ void SA3RenderService::WorkerMain(uint64_t requestId, SA3TextGenerationRequest r
 
   if (cancelled())
   {
-    PublishResult({false, true, {}}, "generation cancelled");
+    PublishResult({false, true, {}}, "render cancelled");
     return;
   }
 
+  const bool hasSource = request.operation != SA3RenderOperation::Generate;
+  const double sourceSeconds = hasSource
+    ? static_cast<double>(request.sourceAudio.numSamples) / request.sourceAudio.sampleRate : 0.0;
+  double generationSeconds = request.durationSeconds;
+  int targetSamples = -1;
+  if (request.operation == SA3RenderOperation::Transform)
+  {
+    generationSeconds = sourceSeconds;
+  }
+  else if (request.operation == SA3RenderOperation::Continue)
+  {
+    const double outputSeconds = sourceSeconds + request.durationSeconds;
+    generationSeconds = outputSeconds + 6.0;
+    targetSamples = std::max(1, static_cast<int>(std::llround(outputSeconds * 44100.0)));
+  }
+
+  std::vector<float> sourcePlanar;
+  if (hasSource)
+    sourcePlanar = ToPlanar(request.sourceAudio);
+
   sa3_request_ex generation = {};
   generation.request.prompt = request.prompt.c_str();
-  int frames = std::max(1, static_cast<int>(request.durationSeconds * 44100.0 / 4096.0 + 0.5));
+  int frames = std::max(1, static_cast<int>(generationSeconds * 44100.0 / 4096.0 + 0.5));
   if (request.variant == "small-music" || request.variant == "small-sfx")
     frames = std::max(2, frames & ~1);
   generation.request.frames = frames;
   generation.request.steps = std::clamp(request.steps, 1, 100);
   generation.request.seed = request.seed;
   generation.request.cfg_scale = request.cfgScale;
-  generation.request.duration_padding_sec = 6.f;
+  generation.request.duration_padding_sec = request.operation == SA3RenderOperation::Generate ? 6.f : 0.f;
   generation.request.keep_models = 0;
   generation.request.loudness.set = 1;
   generation.request.loudness.peak_normalize = request.peakNormalize ? 1 : 0;
@@ -406,8 +478,30 @@ void SA3RenderService::WorkerMain(uint64_t requestId, SA3TextGenerationRequest r
   generation.request.loudness.latent_shift = 0.f;
   static const char* kDistShiftNames[4] = {"LogSNR", "Flux", "Full", "None"};
   generation.request.dist_shift = kDistShiftNames[std::clamp(request.distShift, 0, 3)];
+  generation.encode_chunk_size = hasSource ? 128 : 0;
+  generation.encode_overlap = 32;
   generation.decode_chunk_size = 128;
   generation.decode_overlap = 32;
+
+  if (request.operation == SA3RenderOperation::Transform)
+  {
+    generation.init_audio.mode = SA3_INIT_AUDIO_A2A;
+    generation.init_audio.samples = sourcePlanar.data();
+    generation.init_audio.n_samp = request.sourceAudio.numSamples;
+    generation.init_audio.n_ch = static_cast<int>(request.sourceAudio.channels.size());
+    generation.init_audio.sample_rate = request.sourceAudio.sampleRate;
+    generation.init_audio.init_noise_level = std::clamp(request.initNoiseLevel, 0.01f, 1.f);
+  }
+  else if (request.operation == SA3RenderOperation::Continue)
+  {
+    generation.init_audio.mode = SA3_INIT_AUDIO_INPAINT;
+    generation.init_audio.samples = sourcePlanar.data();
+    generation.init_audio.n_samp = request.sourceAudio.numSamples;
+    generation.init_audio.n_ch = static_cast<int>(request.sourceAudio.channels.size());
+    generation.init_audio.sample_rate = request.sourceAudio.sampleRate;
+    generation.init_audio.inpaint_start = static_cast<float>(sourceSeconds);
+    generation.init_audio.inpaint_end = static_cast<float>(generationSeconds);
+  }
 
   std::vector<const char*> loraPaths;
   std::vector<float> loraStrengths;
@@ -445,46 +539,49 @@ void SA3RenderService::WorkerMain(uint64_t requestId, SA3TextGenerationRequest r
         || progress->requestId != progress->service->mRequestId.load(std::memory_order_acquire);
   };
 
-  SetStatus("generating audio");
+  SetStatus(std::string(OperationName(request.operation)) + " in progress");
   sa3_audio audio = {};
   const int rc = sa3->generateEx(mContext, &generation, &audio, error, static_cast<int>(sizeof(error)));
   if (rc != 0)
   {
     if (cancelled())
-      PublishResult({false, true, {}}, "generation cancelled");
+      PublishResult({false, true, {}}, "render cancelled");
     else
-      PublishResult({false, false, std::string("sa3 failed: ") + error}, "generation failed");
+      PublishResult({false, false, std::string("sa3 failed: ") + error},
+                    std::string(OperationName(request.operation)) + " failed");
     return;
   }
 
   if (cancelled())
   {
     sa3->freeAudio(&audio);
-    PublishResult({false, true, {}}, "generation cancelled");
+    PublishResult({false, true, {}}, "render cancelled");
     return;
   }
 
   if (!audio.samples || audio.n_samp <= 0 || audio.n_ch <= 0 || audio.sample_rate <= 0)
   {
     sa3->freeAudio(&audio);
-    PublishResult({false, false, "libsa3 returned an empty or invalid audio buffer"}, "generation failed");
+    PublishResult({false, false, "libsa3 returned an empty or invalid audio buffer"},
+                  std::string(OperationName(request.operation)) + " failed");
     return;
   }
 
   SA3RenderResult result;
   result.ok = true;
   result.seed = RequestableSeed(audio.seed);
-  result.audio.numSamples = audio.n_samp;
+  const int outputSamples = targetSamples > 0 ? std::min(targetSamples, audio.n_samp) : audio.n_samp;
+  result.audio.numSamples = outputSamples;
   result.audio.sampleRate = std::max(1, audio.sample_rate);
   result.audio.channels.assign(static_cast<size_t>(audio.n_ch),
-                               std::vector<float>(static_cast<size_t>(audio.n_samp), 0.f));
+                               std::vector<float>(static_cast<size_t>(outputSamples), 0.f));
   for (int channel = 0; channel < audio.n_ch; ++channel)
   {
     const float* source = audio.samples + static_cast<size_t>(channel) * audio.n_samp;
-    std::copy(source, source + audio.n_samp, result.audio.channels[static_cast<size_t>(channel)].begin());
+    std::copy(source, source + outputSamples, result.audio.channels[static_cast<size_t>(channel)].begin());
   }
   sa3->freeAudio(&audio);
-  PublishResult(std::move(result), "generation complete");
+  PublishResult(std::move(result), std::string(OperationName(request.operation)) + " complete");
 }
 
 void SA3RenderService::SetStatus(std::string status)

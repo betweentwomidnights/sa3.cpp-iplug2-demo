@@ -2,12 +2,15 @@
 #include "ReaperExt_include_in_plug_src.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <limits>
+#include <random>
 #include <utility>
 
 #include "IControls.h"
@@ -151,6 +154,56 @@ public:
   }
 };
 
+class SA3DiceButton final : public IControl
+{
+public:
+  SA3DiceButton(const IRECT& bounds, std::function<void()> action)
+  : IControl(bounds)
+  , mAction(std::move(action))
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const IColor background = mHovered ? gary::ui::Red() : gary::ui::ButtonFill();
+    const IColor foreground = mHovered ? COLOR_BLACK : COLOR_WHITE;
+    g.FillRoundRect(background, mRECT, gary::ui::CornerRadius);
+    g.DrawRoundRect(mHovered ? gary::ui::Red() : gary::ui::Frame(), mRECT, gary::ui::CornerRadius);
+    const float radius = std::clamp(std::min(mRECT.W(), mRECT.H()) * 0.065f, 1.4f, 2.3f);
+    const float left = mRECT.L + mRECT.W() * 0.31f;
+    const float right = mRECT.R - mRECT.W() * 0.31f;
+    const float top = mRECT.T + mRECT.H() * 0.31f;
+    const float bottom = mRECT.B - mRECT.H() * 0.31f;
+    g.FillCircle(foreground, left, top, radius);
+    g.FillCircle(foreground, right, top, radius);
+    g.FillCircle(foreground, mRECT.MW(), mRECT.MH(), radius);
+    g.FillCircle(foreground, left, bottom, radius);
+    g.FillCircle(foreground, right, bottom, radius);
+  }
+
+  void OnMouseDown(float, float, const IMouseMod&) override
+  {
+    if (mAction)
+      mAction();
+  }
+
+  void OnMouseOver(float, float, const IMouseMod&) override
+  {
+    mHovered = true;
+    SetDirty(false);
+  }
+
+  void OnMouseOut() override
+  {
+    mHovered = false;
+    SetDirty(false);
+  }
+
+private:
+  std::function<void()> mAction;
+  bool mHovered = false;
+};
+
 std::string HexEncode(const std::string& text)
 {
   static constexpr char kHex[] = "0123456789abcdef";
@@ -243,6 +296,194 @@ std::string HumanBytes(uint64_t bytes)
   return text;
 }
 }
+
+class SA3RenderOptionsControl final : public IControl
+{
+public:
+  SA3RenderOptionsControl(const IRECT& bounds, SA3ReaperExtension& owner)
+  : IControl(bounds)
+  , mOwner(owner)
+  {
+    SetTextEntryLength(32);
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    using namespace gary::ui;
+    g.FillRoundRect(PanelDark(), mRECT, 4.f);
+    g.DrawRoundRect(FrameSoft(), mRECT, 4.f);
+
+    const float top = mRECT.T + 5.f;
+    const float mid = std::clamp(mRECT.L + 137.f, mRECT.L + 118.f, mRECT.R - 166.f);
+    g.DrawText(IText(10.f, TextDim(), FontName, EAlign::Near, EVAlign::Middle),
+               "shift", IRECT(mRECT.L + 8.f, top, mRECT.L + 42.f, top + 22.f));
+    mShiftRect = IRECT(mRECT.L + 43.f, top, mid - 7.f, top + 22.f);
+    DrawDropButton(g, mShiftRect, ShiftName(mOwner.mDistShift));
+
+    g.DrawText(IText(10.f, TextDim(), FontName, EAlign::Near, EVAlign::Middle),
+               "seed", IRECT(mid, top, mid + 30.f, top + 22.f));
+    mSeedToggleRect = IRECT(mid + 32.f, top + 4.f, mid + 46.f, top + 18.f);
+    g.DrawRoundRect(mOwner.mUseSeed ? Red() : Frame(), mSeedToggleRect, 2.f);
+    if (mOwner.mUseSeed)
+      g.FillRoundRect(Red(), mSeedToggleRect.GetPadded(-4.f), 1.f);
+    g.DrawText(IText(10.f, mOwner.mUseSeed ? COLOR_WHITE : TextDim(), FontName,
+                     EAlign::Near, EVAlign::Middle), "use", IRECT(mid + 51.f, top, mid + 75.f, top + 22.f));
+
+    mSeedFieldRect = IRECT(mid + 77.f, top, mRECT.R - 8.f, top + 22.f);
+    g.FillRoundRect(ButtonFill(), mSeedFieldRect, 3.f);
+    g.DrawRoundRect(Frame(), mSeedFieldRect, 3.f);
+    const std::string seed = mOwner.mUseSeed ? std::to_string(mOwner.mSeedValue)
+                           : mOwner.mHasLastSeed ? std::to_string(mOwner.mLastSeed)
+                                                 : std::string("random");
+    g.DrawText(IText(10.f, mOwner.mUseSeed ? COLOR_WHITE : TextDim(), FontName,
+                     EAlign::Near, EVAlign::Middle), CompactText(seed, 22).c_str(),
+               mSeedFieldRect.GetPadded(-6.f));
+
+    mDurationRect = {};
+    if (mOwner.mOperation == SA3ReaperExtension::Operation::Continue && mRECT.H() >= 48.f)
+    {
+      const IRECT row(mRECT.L + 8.f, top + 26.f, mRECT.R - 8.f, mRECT.B - 4.f);
+      const double sourceSeconds = mOwner.CurrentSourceLength();
+      const int maximum = std::max(1, static_cast<int>(std::floor(300.0 - sourceSeconds)));
+      const double seconds = mOwner.EffectiveContinueSeconds();
+      char value[32] = {};
+      std::snprintf(value, sizeof(value), "+%.0f s", seconds);
+      g.DrawText(IText(10.f, TextDim(), FontName, EAlign::Near, EVAlign::Middle),
+                 "add", IRECT(row.L, row.T, row.L + 28.f, row.B));
+      g.DrawText(IText(10.f, COLOR_WHITE, FontName, EAlign::Far, EVAlign::Middle),
+                 value, IRECT(row.R - 48.f, row.T, row.R, row.B));
+      mDurationRect = IRECT(row.L + 34.f, row.MH() - 7.f, row.R - 54.f, row.MH() + 7.f);
+      const IRECT track(mDurationRect.L, mDurationRect.MH() - 2.f,
+                        mDurationRect.R, mDurationRect.MH() + 2.f);
+      const float fraction = maximum <= 1 ? 0.f
+        : static_cast<float>((seconds - 1.0) / static_cast<double>(maximum - 1));
+      const float filled = track.L + track.W() * std::clamp(fraction, 0.f, 1.f);
+      g.FillRoundRect(FrameSoft(), track, 2.f);
+      g.FillRoundRect(Red(), IRECT(track.L, track.T, filled, track.B), 2.f);
+      g.FillCircle(COLOR_WHITE, filled, track.MH(), 4.5f);
+    }
+  }
+
+  void OnMouseDown(float x, float y, const IMouseMod&) override
+  {
+    if (mShiftRect.Contains(x, y))
+    {
+      OpenShiftMenu();
+      return;
+    }
+    if (mSeedToggleRect.Contains(x, y))
+    {
+      mOwner.ToggleUseSeed();
+      SetDirty(false);
+      return;
+    }
+    if (mSeedFieldRect.Contains(x, y) && GetUI())
+    {
+      const int64_t value = mOwner.mUseSeed ? mOwner.mSeedValue
+                          : mOwner.mHasLastSeed ? mOwner.mLastSeed : 0;
+      const std::string text = std::to_string(std::max<int64_t>(0, value));
+      const IText entry(12.f, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle);
+      GetUI()->CreateTextEntry(*this, entry.WithTEColors(gary::ui::PanelDark(), COLOR_WHITE),
+                               mSeedFieldRect, text.c_str(), 0);
+      return;
+    }
+    if (mDurationRect.Contains(x, y))
+    {
+      mDraggingDuration = true;
+      UpdateDuration(x);
+    }
+  }
+
+  void OnMouseDrag(float x, float, float, float, const IMouseMod&) override
+  {
+    if (mDraggingDuration)
+      UpdateDuration(x);
+  }
+
+  void OnMouseUp(float, float, const IMouseMod&) override
+  {
+    mDraggingDuration = false;
+  }
+
+  void OnPopupMenuSelection(IPopupMenu* menu, int) override
+  {
+    if (menu)
+    {
+      const int selected = menu->GetChosenItemIdx();
+      if (selected >= 0 && selected <= 3)
+        mOwner.SetDistShift(selected);
+    }
+    SetDirty(false);
+  }
+
+  void OnTextEntryCompletion(const char* text, int) override
+  {
+    if (!text)
+      return;
+    errno = 0;
+    char* end = nullptr;
+    const long long parsed = std::strtoll(text, &end, 10);
+    while (end && (*end == ' ' || *end == '\t'))
+      ++end;
+    if (end != text && end && *end == '\0' && errno != ERANGE && parsed >= 0)
+      mOwner.SetSeedValue(static_cast<int64_t>(parsed));
+    else
+      mOwner.mPanelStatus = "Seed must be a non-negative whole number.";
+    mOwner.RefreshPanel(true);
+    SetDirty(false);
+  }
+
+private:
+  static const char* ShiftName(int value)
+  {
+    static const char* names[] = {"LogSNR", "Flux", "Full", "None"};
+    return names[std::clamp(value, 0, 3)];
+  }
+
+  static void DrawDropButton(IGraphics& g, const IRECT& bounds, const char* text)
+  {
+    g.FillRoundRect(gary::ui::ButtonFill(), bounds, 3.f);
+    g.DrawRoundRect(gary::ui::Frame(), bounds, 3.f);
+    g.DrawText(IText(10.f, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle),
+               text, IRECT(bounds.L + 6.f, bounds.T, bounds.R - 13.f, bounds.B));
+    const float cx = bounds.R - 8.f;
+    const float cy = bounds.MH();
+    g.FillTriangle(gary::ui::TextDim(), cx - 3.f, cy - 2.f, cx + 3.f, cy - 2.f, cx, cy + 2.f);
+  }
+
+  void OpenShiftMenu()
+  {
+    if (!GetUI())
+      return;
+    mShiftMenu.Clear();
+    mShiftMenu.AddItem("LogSNR");
+    mShiftMenu.AddItem("Flux");
+    mShiftMenu.AddItem("Full");
+    mShiftMenu.AddItem("None");
+    mShiftMenu.CheckItem(std::clamp(mOwner.mDistShift, 0, 3), true);
+    GetUI()->CreatePopupMenu(*this, mShiftMenu, mShiftRect);
+  }
+
+  void UpdateDuration(float x)
+  {
+    if (mDurationRect.W() <= 0.f)
+      return;
+    const double sourceSeconds = mOwner.CurrentSourceLength();
+    const int maximum = std::max(1, static_cast<int>(std::floor(300.0 - sourceSeconds)));
+    const float fraction = std::clamp((x - mDurationRect.L) / std::max(1.f, mDurationRect.W()), 0.f, 1.f);
+    const int seconds = maximum <= 1 ? 1 : static_cast<int>(std::llround(1.f + fraction * (maximum - 1)));
+    mOwner.SetContinueSeconds(static_cast<double>(seconds));
+    SetDirty(false);
+  }
+
+  SA3ReaperExtension& mOwner;
+  IPopupMenu mShiftMenu;
+  IRECT mShiftRect;
+  IRECT mSeedToggleRect;
+  IRECT mSeedFieldRect;
+  IRECT mDurationRect;
+  bool mDraggingDuration = false;
+};
 
 class SA3SettingsControl final : public IControl
 {
@@ -682,6 +923,9 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
   IMPAPI(ValidatePtr2);
   IMPAPI(CountTrackMediaItems);
   IMPAPI(GetTrackMediaItem);
+  IMPAPI(CreateTakeAudioAccessor);
+  IMPAPI(DestroyAudioAccessor);
+  IMPAPI(GetAudioAccessorSamples);
   IMPAPI(SplitMediaItem);
   IMPAPI(DeleteTrackMediaItem);
   IMPAPI(PCM_Source_BuildPeaks);
@@ -741,7 +985,7 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
     graphics->AttachControl(new SA3TabControl(initial, "continue", false,
       [this]() { SelectOperation(Operation::Continue); }), kCtrlTagContinue);
     graphics->AttachControl(new IMultiLineTextControl(initial, "No media item selected",
-      IText(17.f, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle)), kCtrlTagSelection);
+      IText(13.f, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle)), kCtrlTagSelection);
     graphics->AttachControl(new ITextControl(initial, "Time selection: none",
       IText(gary::ui::BodyTextSize, gary::ui::TextDim(), gary::ui::FontName, EAlign::Near, EVAlign::Middle)),
       kCtrlTagTiming);
@@ -752,9 +996,12 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
     graphics->AttachControl(new SA3PromptControl(initial, mPrompt.c_str(),
       IText(gary::ui::BodyTextSize, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle)
         .WithTEColors(gary::ui::PanelDark(), COLOR_WHITE)), kCtrlTagPrompt);
+    graphics->AttachControl(new SA3DiceButton(initial,
+      [this]() { RollPrompt(); }), kCtrlTagDice);
+    graphics->AttachControl(new SA3RenderOptionsControl(initial, *this), kCtrlTagRenderOptions);
     graphics->AttachControl(new SA3CreativeLoraControl(initial, *this), kCtrlTagCreativeLoras);
     graphics->AttachControl(new SA3ActionButton(initial, "generate into selection",
-      [this]() { StartOrCancelGeneration(); }), kCtrlTagRun);
+      [this]() { StartOrCancelRender(); }), kCtrlTagRun);
     graphics->AttachControl(new SA3ActionButton(initial, "settings",
       [this]() { ToggleSettingsPage(); }), kCtrlTagSettingsButton);
     graphics->AttachControl(new SA3SettingsControl(initial, *this), kCtrlTagSettings);
@@ -841,12 +1088,15 @@ void SA3ReaperExtension::ApplyResponsiveLayout(IGraphics* graphics)
   place(kCtrlTagTransform, IRECT(tabs.L + tabWidth + tabGap, tabs.T,
                                  tabs.L + tabWidth * 2.f + tabGap, tabs.B), showMain);
   place(kCtrlTagContinue, IRECT(tabs.R - tabWidth, tabs.T, tabs.R, tabs.B), showMain);
-  place(kCtrlTagSelection, IRECT(main.L, main.T + 96.f, main.R, main.T + 132.f), showMain);
-  place(kCtrlTagTiming, IRECT(main.L, main.T + 138.f, main.R, main.T + 164.f), showMain);
-  place(kCtrlTagPrompt, IRECT(main.L, main.T + 174.f, main.R, main.T + 222.f), showMain);
-  place(kCtrlTagCreativeLoras, IRECT(main.L, main.T + 230.f, main.R, main.T + 294.f), showMain);
-  place(kCtrlTagRun, IRECT(main.L, main.T + 302.f, main.R, main.T + 338.f), showMain);
-  place(kCtrlTagHint, IRECT(main.L, std::max(main.T + 346.f, main.B - 48.f), main.R, main.B), showMain);
+  place(kCtrlTagSelection, IRECT(main.L, main.T + 94.f, main.R, main.T + 125.f), showMain);
+  place(kCtrlTagTiming, IRECT(main.L, main.T + 127.f, main.R, main.T + 149.f), showMain);
+  place(kCtrlTagRenderOptions, IRECT(main.L, main.T + 153.f, main.R, main.T + 208.f), showMain);
+  const IRECT prompt(main.L, main.T + 214.f, main.R - 42.f, main.T + 252.f);
+  place(kCtrlTagPrompt, prompt, showMain);
+  place(kCtrlTagDice, IRECT(prompt.R + 7.f, prompt.T, main.R, prompt.B), showMain);
+  place(kCtrlTagCreativeLoras, IRECT(main.L, main.T + 258.f, main.R, main.T + 316.f), showMain);
+  place(kCtrlTagRun, IRECT(main.L, main.T + 322.f, main.R, main.T + 354.f), showMain);
+  place(kCtrlTagHint, IRECT(main.L, std::max(main.T + 360.f, main.B - 42.f), main.R, main.B), showMain);
   place(kCtrlTagSettings, settings, showSettings);
 
   if (IControl* control = graphics->GetControlWithTag(kCtrlTagSettingsButton))
@@ -875,7 +1125,7 @@ void SA3ReaperExtension::ToggleSettingsPage()
 
 void SA3ReaperExtension::ReloadSharedSettings(bool scanModels)
 {
-  const auto request = gary::LoadSharedTextGenerationRequest("", 1.0, 0.0);
+  const auto request = gary::LoadSharedRenderRequest("", 1.0, 0.0);
   const bool modelLocationChanged = request.modelsDir != mModelsDir || request.variant != mModelVariant;
   mModelsDir = request.modelsDir;
   mModelVariant = request.variant;
@@ -1303,6 +1553,10 @@ void SA3ReaperExtension::SaveProjectState(ProjectStateContext* context)
   SyncPromptFromUI();
   const std::string encoded = HexEncode(mPrompt);
   context->AddLine("SA3_REAPER_GENERATE_PROMPT %s", encoded.empty() ? "-" : encoded.c_str());
+  context->AddLine("SA3_REAPER_RENDER_OPTIONS %d %.17g %d %lld %d %lld",
+                   std::clamp(mDistShift, 0, 3), mContinueSeconds, mUseSeed ? 1 : 0,
+                   static_cast<long long>(mSeedValue), mHasLastSeed ? 1 : 0,
+                   static_cast<long long>(mLastSeed));
 }
 
 bool SA3ReaperExtension::LoadProjectStateLine(const char* line)
@@ -1311,29 +1565,58 @@ bool SA3ReaperExtension::LoadProjectStateLine(const char* line)
     return false;
   while (*line == ' ' || *line == '\t')
     ++line;
-  constexpr const char* prefix = "SA3_REAPER_GENERATE_PROMPT ";
-  const size_t prefixLength = std::strlen(prefix);
-  if (std::strncmp(line, prefix, prefixLength) != 0)
-    return false;
-
-  std::string decoded;
-  if (std::strcmp(line + prefixLength, "-") == 0)
-    decoded.clear();
-  else if (!HexDecode(line + prefixLength, decoded))
-    return true;
-  mPrompt = std::move(decoded);
-  if (IGraphics* ui = GetUI())
+  constexpr const char* promptPrefix = "SA3_REAPER_GENERATE_PROMPT ";
+  const size_t promptPrefixLength = std::strlen(promptPrefix);
+  if (std::strncmp(line, promptPrefix, promptPrefixLength) == 0)
   {
-    if (IControl* control = ui->GetControlWithTag(kCtrlTagPrompt))
+    std::string decoded;
+    if (std::strcmp(line + promptPrefixLength, "-") == 0)
+      decoded.clear();
+    else if (!HexDecode(line + promptPrefixLength, decoded))
+      return true;
+    mPrompt = std::move(decoded);
+    if (IGraphics* ui = GetUI())
     {
-      if (auto* promptControl = control->As<ITextControl>())
+      if (IControl* control = ui->GetControlWithTag(kCtrlTagPrompt))
       {
-        promptControl->SetStr(mPrompt.c_str());
-        promptControl->SetDirty(false);
+        if (auto* promptControl = control->As<ITextControl>())
+        {
+          promptControl->SetStr(mPrompt.c_str());
+          promptControl->SetDirty(false);
+        }
       }
     }
+    return true;
   }
-  return true;
+
+  constexpr const char* optionsPrefix = "SA3_REAPER_RENDER_OPTIONS ";
+  const size_t optionsPrefixLength = std::strlen(optionsPrefix);
+  if (std::strncmp(line, optionsPrefix, optionsPrefixLength) == 0)
+  {
+    int distShift = 0;
+    double continueSeconds = 0.0;
+    int useSeed = 0;
+    long long seedValue = 0;
+    int hasLastSeed = 0;
+    long long lastSeed = 0;
+    if (std::sscanf(line + optionsPrefixLength, "%d %lf %d %lld %d %lld",
+                    &distShift, &continueSeconds, &useSeed, &seedValue,
+                    &hasLastSeed, &lastSeed) == 6)
+    {
+      mDistShift = std::clamp(distShift, 0, 3);
+      mContinueSeconds = std::isfinite(continueSeconds)
+        ? std::clamp(continueSeconds, 0.0, 300.0) : 0.0;
+      mUseSeed = useSeed != 0;
+      mSeedValue = std::max<int64_t>(0, static_cast<int64_t>(seedValue));
+      mHasLastSeed = hasLastSeed != 0;
+      mLastSeed = std::max<int64_t>(0, static_cast<int64_t>(lastSeed));
+      if (IGraphics* ui = GetUI())
+        if (IControl* control = ui->GetControlWithTag(kCtrlTagRenderOptions))
+          control->SetDirty(false);
+    }
+    return true;
+  }
+  return false;
 }
 
 void SA3ReaperExtension::OnBeginLoadProjectState(bool)
@@ -1341,6 +1624,12 @@ void SA3ReaperExtension::OnBeginLoadProjectState(bool)
   mRenderService.Cancel();
   mPendingGeneration = {};
   mPrompt.clear();
+  mDistShift = 0;
+  mContinueSeconds = 0.0;
+  mUseSeed = false;
+  mSeedValue = 0;
+  mHasLastSeed = false;
+  mLastSeed = 0;
   mPanelStatus = "Set a time selection and choose one destination track.";
   if (IGraphics* ui = GetUI())
   {
@@ -1352,6 +1641,8 @@ void SA3ReaperExtension::OnBeginLoadProjectState(bool)
         promptControl->SetDirty(false);
       }
     }
+    if (IControl* control = ui->GetControlWithTag(kCtrlTagRenderOptions))
+      control->SetDirty(false);
   }
 }
 
@@ -1425,8 +1716,8 @@ void SA3ReaperExtension::SelectOperation(Operation operation)
   mOperation = operation;
   switch (operation)
   {
-    case Operation::Transform: mPanelStatus = "Transform audio extraction is the next implementation slice."; break;
-    case Operation::Continue: mPanelStatus = "Continuation splicing is the next implementation slice."; break;
+    case Operation::Transform: mPanelStatus = "Select one audio item; a time selection can narrow the transform range."; break;
+    case Operation::Continue: mPanelStatus = "Select one audio item, then choose how many seconds Continue should add."; break;
     case Operation::Generate: mPanelStatus = "Set a time selection and choose one destination track."; break;
   }
   if (*GetWindowTogglePtr() == 0)
@@ -1434,7 +1725,7 @@ void SA3ReaperExtension::SelectOperation(Operation operation)
   RefreshPanel(true);
 }
 
-void SA3ReaperExtension::StartOrCancelGeneration()
+void SA3ReaperExtension::StartOrCancelRender()
 {
   if (mRenderService.Busy())
   {
@@ -1443,48 +1734,112 @@ void SA3ReaperExtension::StartOrCancelGeneration()
     return;
   }
 
-  if (mOperation != Operation::Generate)
-  {
-    mPanelStatus = "Only Generate is connected in this checkpoint.";
-    RefreshPanel(true);
-    return;
-  }
-
   SyncPromptFromUI();
   const SelectionSnapshot selection = ReadSelection();
-  const double duration = selection.timeEnd - selection.timeStart;
-  if (duration < 1.0)
-  {
-    mPanelStatus = "Set a time selection of at least 1 second.";
-    RefreshPanel(true);
-    return;
-  }
-  if (duration > 300.0)
-  {
-    mPanelStatus = "This first Generate workflow supports time selections up to 300 seconds.";
-    RefreshPanel(true);
-    return;
-  }
-
   MediaTrack* destinationTrack = nullptr;
-  if (selection.selectedTrackCount == 1)
-    destinationTrack = GetSelectedTrack(nullptr, 0);
-  else if (selection.selectedTrackCount == 0 && selection.itemCount == 1)
+  MediaItem_Take* sourceTake = nullptr;
+  double start = selection.timeStart;
+  double sourceEnd = selection.timeEnd;
+  double renderDuration = sourceEnd - start;
+  gary::SA3RenderOperation renderOperation = gary::SA3RenderOperation::Generate;
+
+  if (mOperation == Operation::Generate)
   {
-    if (MediaItem* item = GetSelectedMediaItem(nullptr, 0))
-      destinationTrack = GetMediaItemTrack(item);
+    if (renderDuration < 1.0 || renderDuration > 300.0)
+    {
+      mPanelStatus = "Set a time selection between 1 and 300 seconds.";
+      RefreshPanel(true);
+      return;
+    }
+    if (selection.selectedTrackCount == 1)
+      destinationTrack = GetSelectedTrack(nullptr, 0);
+    else if (selection.selectedTrackCount == 0 && selection.itemCount == 1)
+    {
+      if (MediaItem* item = GetSelectedMediaItem(nullptr, 0))
+        destinationTrack = GetMediaItemTrack(item);
+    }
+  }
+  else
+  {
+    if (selection.itemCount != 1 || !selection.hasActiveTake || !selection.firstTakeIsAudio)
+    {
+      mPanelStatus = "Select exactly one audio media item for Transform or Continue.";
+      RefreshPanel(true);
+      return;
+    }
+    MediaItem* item = GetSelectedMediaItem(nullptr, 0);
+    sourceTake = item ? GetActiveTake(item) : nullptr;
+    destinationTrack = item ? GetMediaItemTrack(item) : nullptr;
+    if (!item || !sourceTake || !destinationTrack)
+    {
+      mPanelStatus = "The selected audio item is no longer available.";
+      RefreshPanel(true);
+      return;
+    }
+
+    const double itemStart = GetMediaItemInfo_Value(item, "D_POSITION");
+    const double itemEnd = itemStart + GetMediaItemInfo_Value(item, "D_LENGTH");
+    if (sourceEnd <= start)
+    {
+      start = itemStart;
+      sourceEnd = itemEnd;
+    }
+    else
+    {
+      start = std::max(start, itemStart);
+      sourceEnd = std::min(sourceEnd, itemEnd);
+    }
+    const double sourceDuration = sourceEnd - start;
+    renderDuration = sourceDuration;
+    if (sourceDuration < 1.0)
+    {
+      mPanelStatus = "The selected audio range must be at least 1 second.";
+      RefreshPanel(true);
+      return;
+    }
+    if (sourceDuration > 300.0)
+    {
+      mPanelStatus = "The selected audio range cannot exceed 300 seconds.";
+      RefreshPanel(true);
+      return;
+    }
+    renderOperation = mOperation == Operation::Transform
+      ? gary::SA3RenderOperation::Transform : gary::SA3RenderOperation::Continue;
+    if (mOperation == Operation::Continue)
+    {
+      const double available = 300.0 - sourceDuration;
+      renderDuration = std::min(mContinueSeconds > 0.0 ? mContinueSeconds : sourceDuration, available);
+      if (renderDuration < 1.0 || sourceDuration + renderDuration > 300.0)
+      {
+        mPanelStatus = "Continuation length must be at least 1 second and keep the total at 300 seconds or less.";
+        RefreshPanel(true);
+        return;
+      }
+    }
   }
 
   if (!destinationTrack)
   {
-    mPanelStatus = "Select exactly one destination track before generating.";
+    mPanelStatus = "Select exactly one destination track.";
     RefreshPanel(true);
     return;
   }
 
-  auto request = gary::LoadSharedTextGenerationRequest(mPrompt, duration, selection.bpm);
+  auto request = gary::LoadSharedRenderRequest(mPrompt, renderDuration, selection.bpm, renderOperation);
+  request.distShift = std::clamp(mDistShift, 0, 3);
+  request.seed = mUseSeed ? std::max<int64_t>(0, mSeedValue) : -1;
+  if (sourceTake)
+  {
+    std::string captureError;
+    if (!CaptureTakeAudio(sourceTake, start, sourceEnd, request.sourceAudio, captureError))
+    {
+      mPanelStatus = "Could not capture the selected audio: " + captureError;
+      RefreshPanel(true);
+      return;
+    }
+  }
   std::string validationError;
-  if (!gary::ValidateTextGenerationRequest(request, validationError))
+  if (!gary::ValidateRenderRequest(request, validationError))
   {
     mPanelStatus = validationError;
     RefreshPanel(true);
@@ -1492,17 +1847,23 @@ void SA3ReaperExtension::StartOrCancelGeneration()
   }
 
   mPendingGeneration.track = destinationTrack;
-  mPendingGeneration.start = selection.timeStart;
-  mPendingGeneration.end = selection.timeEnd;
+  mPendingGeneration.operation = mOperation;
+  mPendingGeneration.start = start;
+  mPendingGeneration.end = mOperation == Operation::Continue ? sourceEnd + renderDuration : sourceEnd;
   mPendingGeneration.prompt = mPrompt;
-  if (!mRenderService.StartTextGeneration(std::move(request)))
+  if (!mRenderService.StartRender(std::move(request)))
   {
     mPendingGeneration = {};
     mPanelStatus = mRenderService.Status();
   }
   else
   {
-    mPanelStatus = "Generation queued. The captured track and time range will be replaced when it finishes.";
+    if (mOperation == Operation::Transform)
+      mPanelStatus = "Transform queued. The captured source range will be replaced when it finishes.";
+    else if (mOperation == Operation::Continue)
+      mPanelStatus = "Continuation queued. It will add " + SettingFloat(static_cast<float>(renderDuration)) + " seconds.";
+    else
+      mPanelStatus = "Generation queued. The captured track and time range will be replaced when it finishes.";
   }
   RefreshPanel(true);
 }
@@ -1511,24 +1872,32 @@ void SA3ReaperExtension::FinishGeneration(gary::SA3RenderResult result)
 {
   const PendingGeneration pending = std::move(mPendingGeneration);
   mPendingGeneration = {};
+  const char* operationName = pending.operation == Operation::Transform ? "Transform"
+                            : pending.operation == Operation::Continue ? "Continuation" : "Generation";
   if (result.cancelled)
   {
-    mPanelStatus = "Generation cancelled; the timeline was not changed.";
+    mPanelStatus = std::string(operationName) + " cancelled; the timeline was not changed.";
     return;
   }
   if (!result.ok)
   {
-    mPanelStatus = result.error.empty() ? "Generation failed." : result.error;
+    mPanelStatus = result.error.empty() ? std::string(operationName) + " failed." : result.error;
     return;
   }
+  mLastSeed = std::max<int64_t>(0, result.seed);
+  mHasLastSeed = true;
+  MarkProjectDirty(nullptr);
+  if (IGraphics* ui = GetUI())
+    if (IControl* control = ui->GetControlWithTag(kCtrlTagRenderOptions))
+      control->SetDirty(false);
   if (!pending.track || !ValidatePtr2(nullptr, pending.track, "MediaTrack*"))
   {
-    mPanelStatus = "Generation finished, but the captured destination track no longer exists.";
+    mPanelStatus = std::string(operationName) + " finished, but the captured destination track no longer exists.";
     return;
   }
 
   std::string pathError;
-  const std::string outputPath = MakeUniqueOutputPath(pathError);
+  const std::string outputPath = MakeUniqueOutputPath(pending.operation, pathError);
   if (outputPath.empty())
   {
     mPanelStatus = pathError;
@@ -1538,21 +1907,23 @@ void SA3ReaperExtension::FinishGeneration(gary::SA3RenderResult result)
   const auto file = gary::SaveWavFile(outputPath, result.audio);
   if (!file.ok)
   {
-    mPanelStatus = "Could not save generated audio: " + file.error;
+    mPanelStatus = std::string("Could not save the ") + operationName + " audio: " + file.error;
     return;
   }
 
   std::string insertError;
-  if (!ReplaceTimeSelectionWithAudio(pending.track, pending.start, pending.end, outputPath,
-                                     pending.prompt, insertError))
+  if (!ReplaceRangeWithAudio(pending.track, pending.start, pending.end, outputPath,
+                             pending.prompt, pending.operation, insertError))
   {
-    mPanelStatus = "Generated audio was saved, but timeline insertion failed: " + insertError;
+    mPanelStatus = std::string(operationName) + " audio was saved, but timeline insertion failed: " + insertError;
     return;
   }
 
   char status[320] = {};
-  std::snprintf(status, sizeof(status), "Generated %.2f seconds and replaced the captured range (seed %lld).",
-                pending.end - pending.start, static_cast<long long>(result.seed));
+  const char* action = pending.operation == Operation::Transform ? "Transformed"
+                     : pending.operation == Operation::Continue ? "Continued" : "Generated";
+  std::snprintf(status, sizeof(status), "%s %.2f seconds and replaced the captured range (seed %lld).",
+                action, pending.end - pending.start, static_cast<long long>(result.seed));
   mPanelStatus = status;
 }
 
@@ -1595,9 +1966,63 @@ void SA3ReaperExtension::ContinuePendingPeakBuilds()
     UpdateArrange();
 }
 
-bool SA3ReaperExtension::ReplaceTimeSelectionWithAudio(MediaTrack* track, double start, double end,
-                                                        const std::string& wavPath, const std::string& prompt,
-                                                        std::string& error)
+bool SA3ReaperExtension::CaptureTakeAudio(MediaItem_Take* take, double start, double end,
+                                           gary::RecordingSnapshot& audio, std::string& error) const
+{
+  if (!take || end <= start)
+  {
+    error = "invalid take or source range";
+    return false;
+  }
+
+  AudioAccessor* accessor = CreateTakeAudioAccessor(take);
+  if (!accessor)
+  {
+    error = "REAPER could not create an audio accessor for the selected take";
+    return false;
+  }
+
+  constexpr int sampleRate = 44100;
+  constexpr int channels = 2;
+  constexpr int blockSize = 8192;
+  const int sampleCount = std::max(1, static_cast<int>(std::llround((end - start) * sampleRate)));
+  audio = {};
+  audio.sampleRate = sampleRate;
+  audio.numSamples = sampleCount;
+  audio.channels.assign(channels, std::vector<float>(static_cast<size_t>(sampleCount), 0.f));
+
+  std::vector<double> interleaved(static_cast<size_t>(blockSize) * channels, 0.0);
+  for (int offset = 0; offset < sampleCount; offset += blockSize)
+  {
+    const int count = std::min(blockSize, sampleCount - offset);
+    std::fill(interleaved.begin(), interleaved.begin() + static_cast<ptrdiff_t>(count * channels), 0.0);
+    const double blockStart = start + static_cast<double>(offset) / sampleRate;
+    const int result = GetAudioAccessorSamples(accessor, sampleRate, channels, blockStart, count,
+                                               interleaved.data());
+    if (result < 0)
+    {
+      DestroyAudioAccessor(accessor);
+      audio = {};
+      error = "REAPER returned an error while reading the selected take";
+      return false;
+    }
+    for (int sample = 0; sample < count; ++sample)
+    {
+      for (int channel = 0; channel < channels; ++channel)
+      {
+        audio.channels[static_cast<size_t>(channel)][static_cast<size_t>(offset + sample)] =
+          static_cast<float>(interleaved[static_cast<size_t>(sample * channels + channel)]);
+      }
+    }
+  }
+
+  DestroyAudioAccessor(accessor);
+  return true;
+}
+
+bool SA3ReaperExtension::ReplaceRangeWithAudio(MediaTrack* track, double start, double end,
+                                                const std::string& wavPath, const std::string& prompt,
+                                                Operation operation, std::string& error)
 {
   if (!track || end <= start)
   {
@@ -1642,7 +2067,10 @@ bool SA3ReaperExtension::ReplaceTimeSelectionWithAudio(MediaTrack* track, double
   SetMediaItemInfo_Value(generatedItem, "D_LENGTH", end - start);
   SetMediaItemInfo_Value(generatedItem, "B_LOOPSRC", 0.0);
   SetMediaItemInfo_Value(generatedItem, "B_UISEL", 1.0);
-  std::string takeName = prompt.empty() ? "SA3 generation" : "SA3 - " + prompt.substr(0, 80);
+  const char* operationName = operation == Operation::Transform ? "transform"
+                            : operation == Operation::Continue ? "continuation" : "generation";
+  std::string takeName = prompt.empty() ? std::string("SA3 ") + operationName
+                                        : "SA3 - " + prompt.substr(0, 80);
   GetSetMediaItemTakeInfo_String(generatedTake, "P_NAME", takeName.data(), true);
 
   for (MediaItem* item : overlappingItems)
@@ -1663,7 +2091,12 @@ bool SA3ReaperExtension::ReplaceTimeSelectionWithAudio(MediaTrack* track, double
     DeleteTrackMediaItem(track, inside);
   }
 
-  Undo_EndBlock2(nullptr, "SA3: Generate into time selection", -1);
+  // Deleting the previously selected source can clear REAPER's item selection,
+  // so select the replacement after those deletions have completed.
+  SetMediaItemInfo_Value(generatedItem, "B_UISEL", 1.0);
+
+  const std::string undoName = std::string("SA3: ") + operationName + " into timeline";
+  Undo_EndBlock2(nullptr, undoName.c_str(), -1);
   if (PCM_Source_BuildPeaks(source, 0) != 0)
     mPendingPeakBuilds.push_back({generatedItem, source});
   UpdateItemInProject(generatedItem);
@@ -1672,7 +2105,7 @@ bool SA3ReaperExtension::ReplaceTimeSelectionWithAudio(MediaTrack* track, double
   return true;
 }
 
-std::string SA3ReaperExtension::MakeUniqueOutputPath(std::string& error) const
+std::string SA3ReaperExtension::MakeUniqueOutputPath(Operation operation, std::string& error) const
 {
   const std::string documents = gary::DocumentsDirectory(&error);
   if (documents.empty())
@@ -1689,7 +2122,9 @@ std::string SA3ReaperExtension::MakeUniqueOutputPath(std::string& error) const
 
   const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
     std::chrono::system_clock::now().time_since_epoch()).count();
-  const std::string stem = "sa3-generate-" + std::to_string(milliseconds);
+  const char* operationName = operation == Operation::Transform ? "transform"
+                            : operation == Operation::Continue ? "continue" : "generate";
+  const std::string stem = std::string("sa3-") + operationName + "-" + std::to_string(milliseconds);
   for (int suffix = 0; suffix < 1000; ++suffix)
   {
     const std::string name = stem + (suffix == 0 ? "" : "-" + std::to_string(suffix)) + ".wav";
@@ -1718,6 +2153,104 @@ void SA3ReaperExtension::SyncPromptFromUI()
   }
 }
 
+void SA3ReaperExtension::RollPrompt()
+{
+  std::vector<std::string> prompts;
+  auto appendUnique = [&prompts](const std::string& prompt) {
+    if (!prompt.empty() && std::find(prompts.begin(), prompts.end(), prompt) == prompts.end())
+      prompts.push_back(prompt);
+  };
+  for (const auto& lora : mCreativeLoras)
+  {
+    if (!lora.enabled || lora.strength <= 0.f)
+      continue;
+    for (const auto& prompt : gary::LoadPromptPoolForLora(lora.path, lora.name))
+      appendUnique(prompt);
+  }
+  const bool usingLoraPrompts = !prompts.empty();
+  if (!usingLoraPrompts)
+    for (const auto& prompt : gary::LoadDefaultPromptPool())
+      appendUnique(prompt);
+  if (prompts.empty())
+  {
+    mPanelStatus = "Prompt pool is empty.";
+    RefreshPanel(true);
+    return;
+  }
+
+  std::random_device randomDevice;
+  std::mt19937 random(randomDevice());
+  std::uniform_int_distribution<size_t> choose(0, prompts.size() - 1u);
+  mPrompt = prompts[choose(random)];
+  if (IGraphics* ui = GetUI())
+  {
+    if (IControl* control = ui->GetControlWithTag(kCtrlTagPrompt))
+    {
+      if (auto* promptControl = control->As<ITextControl>())
+      {
+        promptControl->SetStr(mPrompt.c_str());
+        promptControl->SetDirty(false);
+      }
+    }
+  }
+  mPanelStatus = usingLoraPrompts ? "Rolled a prompt from the active LoRA pool."
+                                  : "Rolled a default prompt.";
+  MarkProjectDirty(nullptr);
+  RefreshPanel(true);
+}
+
+void SA3ReaperExtension::SetDistShift(int distShift)
+{
+  mDistShift = std::clamp(distShift, 0, 3);
+  MarkProjectDirty(nullptr);
+  RefreshPanel(true);
+}
+
+void SA3ReaperExtension::ToggleUseSeed()
+{
+  mUseSeed = !mUseSeed;
+  if (mUseSeed && mSeedValue <= 0 && mHasLastSeed)
+    mSeedValue = mLastSeed;
+  MarkProjectDirty(nullptr);
+  RefreshPanel(true);
+}
+
+void SA3ReaperExtension::SetSeedValue(int64_t seed)
+{
+  mSeedValue = std::max<int64_t>(0, seed);
+  mUseSeed = true;
+  MarkProjectDirty(nullptr);
+  RefreshPanel(true);
+}
+
+void SA3ReaperExtension::SetContinueSeconds(double seconds)
+{
+  mContinueSeconds = std::clamp(seconds, 1.0, 300.0);
+  MarkProjectDirty(nullptr);
+  RefreshPanel(true);
+}
+
+double SA3ReaperExtension::CurrentSourceLength() const
+{
+  if (mSelection.itemCount != 1)
+    return 0.0;
+  const double itemEnd = mSelection.itemStart + mSelection.itemLength;
+  const double timeLength = std::max(0.0, mSelection.timeEnd - mSelection.timeStart);
+  const double sourceStart = timeLength > 0.0 ? std::max(mSelection.timeStart, mSelection.itemStart)
+                                              : mSelection.itemStart;
+  const double sourceEnd = timeLength > 0.0 ? std::min(mSelection.timeEnd, itemEnd) : itemEnd;
+  return std::max(0.0, sourceEnd - sourceStart);
+}
+
+double SA3ReaperExtension::EffectiveContinueSeconds() const
+{
+  const double sourceSeconds = CurrentSourceLength();
+  const double requested = mContinueSeconds > 0.0 ? mContinueSeconds
+                                                   : sourceSeconds >= 1.0 ? sourceSeconds : 12.0;
+  const double available = 300.0 - sourceSeconds;
+  return available >= 1.0 ? std::clamp(requested, 1.0, available) : 1.0;
+}
+
 void SA3ReaperExtension::RefreshPanel(bool force)
 {
   const SelectionSnapshot current = ReadSelection();
@@ -1731,27 +2264,65 @@ void SA3ReaperExtension::RefreshPanel(bool force)
   if (!ui)
     return;
 
-  char selectionText[768] = {};
-  if (current.itemCount == 0)
+  const double timeLength = std::max(0.0, current.timeEnd - current.timeStart);
+  std::string selectionText;
+  if (mOperation == Operation::Generate)
   {
-    const char* destination = current.selectedTrackCount == 1
-      ? (current.selectedTrackName.empty() ? "Unnamed track" : current.selectedTrackName.c_str())
-      : current.selectedTrackCount > 1 ? "multiple tracks selected" : "no destination track selected";
-    std::snprintf(selectionText, sizeof(selectionText), "No media item selected\nDestination: %s", destination);
+    std::string destination;
+    if (current.selectedTrackCount == 1)
+      destination = current.selectedTrackName.empty() ? "unnamed track" : current.selectedTrackName;
+    else if (current.selectedTrackCount == 0 && current.itemCount == 1)
+      destination = current.trackName.empty() ? "selected item's track" : current.trackName;
+    else if (current.selectedTrackCount > 1)
+      destination = "select exactly one track";
+    else
+      destination = "select one destination track";
+
+    selectionText = "Target: " + CompactText(destination, 42) + "\nRange: ";
+    if (timeLength > 0.0001)
+    {
+      char range[64] = {};
+      std::snprintf(range, sizeof(range), "time selection (%.2f s)", timeLength);
+      selectionText += range;
+    }
+    else
+      selectionText += "set a time selection (1-300 s)";
+  }
+  else if (current.itemCount != 1)
+  {
+    if (current.itemCount == 0)
+      selectionText = "Source: select one audio item\nRange: whole item; time selection optionally narrows it";
+    else
+      selectionText = "Source: select exactly one audio item\nRange: whole item; time selection optionally narrows it";
+  }
+  else if (!current.hasActiveTake || !current.firstTakeIsAudio)
+  {
+    selectionText = "Source: selected item is not usable audio\nSelect one audio item with an active take";
   }
   else
   {
-    const char* track = current.trackName.empty() ? "Unnamed track" : current.trackName.c_str();
-    const char* take = current.takeName.empty() ? "Unnamed take" : current.takeName.c_str();
-    const char* type = current.sourceType.empty() ? "unknown source" : current.sourceType.c_str();
-    std::snprintf(selectionText, sizeof(selectionText),
-      "%d item%s selected  |  %.2f s\n%s / %s  |  %s",
-      current.itemCount, current.itemCount == 1 ? "" : "s", current.itemLength,
-      track, take, type);
+    const double itemEnd = current.itemStart + current.itemLength;
+    const double sourceStart = timeLength > 0.0001 ? std::max(current.timeStart, current.itemStart)
+                                                   : current.itemStart;
+    const double sourceEnd = timeLength > 0.0001 ? std::min(current.timeEnd, itemEnd) : itemEnd;
+    const double sourceLength = std::max(0.0, sourceEnd - sourceStart);
+    if (timeLength > 0.0001 && sourceLength <= 0.0001)
+    {
+      selectionText = "Source: time selection does not overlap the item\nMove or clear the time selection to choose the source range";
+    }
+    else
+    {
+      const std::string take = CompactText(current.takeName.empty() ? "unnamed take" : current.takeName, 23);
+      const std::string track = CompactText(current.trackName.empty() ? "unnamed track" : current.trackName, 18);
+      char range[128] = {};
+      std::snprintf(range, sizeof(range), "Range: %s (%.2f s)",
+                    timeLength > 0.0001 ? "time-selection overlap" : "entire item", sourceLength);
+      selectionText = range;
+      selectionText += "\nSource: " + take + "  /  " + track;
+    }
   }
 
   char timingText[256] = {};
-  const double timeLength = std::max(0.0, current.timeEnd - current.timeStart);
   if (timeLength > 0.0001)
   {
     std::snprintf(timingText, sizeof(timingText),
@@ -1776,7 +2347,7 @@ void SA3ReaperExtension::RefreshPanel(bool force)
   else
     statusText = mPanelStatus;
 
-  SetTaggedText(kCtrlTagSelection, selectionText);
+  SetTaggedText(kCtrlTagSelection, selectionText.c_str());
   SetTaggedText(kCtrlTagTiming, timingText);
   SetTaggedText(kCtrlTagHint, statusText.c_str());
 
@@ -1786,6 +2357,8 @@ void SA3ReaperExtension::RefreshPanel(bool force)
     control->As<SA3TabControl>()->SetActive(mOperation == Operation::Continue);
   if (IControl* control = ui->GetControlWithTag(kCtrlTagGenerate))
     control->As<SA3TabControl>()->SetActive(mOperation == Operation::Generate);
+  if (IControl* control = ui->GetControlWithTag(kCtrlTagRenderOptions))
+    control->SetDirty(false);
 
   if (IControl* control = ui->GetControlWithTag(kCtrlTagRun))
   {
@@ -1804,9 +2377,27 @@ void SA3ReaperExtension::RefreshPanel(bool force)
     }
     else
     {
-      runButton->SetLabel(mOperation == Operation::Transform ? "transform — coming next"
-                                                            : "continue — coming next");
-      runButton->SetEnabled(false);
+      const double itemEnd = current.itemStart + current.itemLength;
+      const double sourceStart = timeLength > 0.0 ? std::max(current.timeStart, current.itemStart)
+                                                  : current.itemStart;
+      const double sourceEnd = timeLength > 0.0 ? std::min(current.timeEnd, itemEnd) : itemEnd;
+      const double sourceLength = std::max(0.0, sourceEnd - sourceStart);
+      const bool validAudioSource = current.itemCount == 1 && current.hasActiveTake
+                                 && current.firstTakeIsAudio && sourceLength >= 1.0;
+      if (mOperation == Operation::Transform)
+      {
+        runButton->SetLabel("transform selected audio");
+        runButton->SetEnabled(validAudioSource && sourceLength <= 300.0);
+      }
+      else
+      {
+        const double continuationSeconds = EffectiveContinueSeconds();
+        char label[96] = {};
+        std::snprintf(label, sizeof(label), "continue + %.0f s", continuationSeconds);
+        runButton->SetLabel(label);
+        runButton->SetEnabled(validAudioSource && continuationSeconds >= 1.0
+                              && sourceLength + continuationSeconds <= 300.0);
+      }
     }
   }
 }

@@ -19,17 +19,28 @@ struct SA3LoraSetting
   float strength = 1.f;
 };
 
-struct SA3TextGenerationRequest
+enum class SA3RenderOperation
 {
+  Generate,
+  Transform,
+  Continue
+};
+
+struct SA3RenderRequest
+{
+  SA3RenderOperation operation = SA3RenderOperation::Generate;
   std::string prompt;
+  // Generate: output duration. Continue: additional duration. Transform follows sourceAudio.
   double durationSeconds = 30.0;
   double bpm = 120.0;
   int steps = 8;
   float cfgScale = 1.f;
+  float initNoiseLevel = 0.5f;
   int64_t seed = -1;
   int distShift = 0;
   std::string modelsDir;
   std::string variant = "medium";
+  RecordingSnapshot sourceAudio;
   std::vector<SA3LoraSetting> loras;
   bool peakNormalize = true;
   float peakNormalizeDb = 2.f;
@@ -47,10 +58,11 @@ struct SA3RenderResult
   int64_t seed = 0;
 };
 
-SA3TextGenerationRequest LoadSharedTextGenerationRequest(std::string prompt,
-                                                         double durationSeconds,
-                                                         double bpm);
-bool ValidateTextGenerationRequest(const SA3TextGenerationRequest& request, std::string& error);
+SA3RenderRequest LoadSharedRenderRequest(std::string prompt,
+                                         double durationSeconds,
+                                         double bpm,
+                                         SA3RenderOperation operation = SA3RenderOperation::Generate);
+bool ValidateRenderRequest(const SA3RenderRequest& request, std::string& error);
 
 class SA3RenderService
 {
@@ -61,7 +73,7 @@ public:
   SA3RenderService(const SA3RenderService&) = delete;
   SA3RenderService& operator=(const SA3RenderService&) = delete;
 
-  bool StartTextGeneration(SA3TextGenerationRequest request);
+  bool StartRender(SA3RenderRequest request);
   void Cancel();
   bool Busy() const noexcept { return mBusy.load(std::memory_order_acquire); }
   float Progress() const noexcept { return mProgress.load(std::memory_order_acquire); }
@@ -69,7 +81,7 @@ public:
   bool TakeCompletedResult(SA3RenderResult& result);
 
 private:
-  void WorkerMain(uint64_t requestId, SA3TextGenerationRequest request);
+  void WorkerMain(uint64_t requestId, SA3RenderRequest request);
   void SetStatus(std::string status);
   void PublishResult(SA3RenderResult result, std::string status);
   void StopWorker();
@@ -90,4 +102,3 @@ private:
 };
 
 }
-

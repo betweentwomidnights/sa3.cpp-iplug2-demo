@@ -182,13 +182,13 @@ The repository also builds an early REAPER extension target. It registers Transf
 adds Transform and Continue to the media-item context menu, and opens a dockable panel that follows the selected item,
 destination track, time selection, tempo, and time signature.
 
-Generate is connected end-to-end through the embedded `libsa3` runtime. Select exactly one destination track, make a
-time selection between 1 and 300 seconds, enter a prompt, and click `generate into selection`. The extension captures
-that track/range for the duration of the background render, writes each result to a unique WAV under
-`Documents/sa3-iplug2-demo/reaper_audio`, and replaces only the overlapping portion of items on that track. The edit is
-one REAPER undo step. Model variant, creative LoRAs, the SAME-L decoder LoRA, and loudness processing are read from the
-same persisted settings used by the VST3, while the Generate prompt is stored per project in the `.RPP`. Transform and
-Continue remain selection-aware placeholders for the next slices.
+Generate, Transform, and Continue are connected end-to-end through the embedded `libsa3` runtime. Generate replaces a
+time selection on the chosen destination track. Transform captures one selected audio item (optionally narrowed by a
+time selection) and replaces that range. Continue captures the same source range, appends the selected number of
+seconds, and uses sa3.cpp's source splice for a clean transition. Each result is written to a unique WAV under
+`Documents/sa3-iplug2-demo/reaper_audio`, and each timeline edit is one REAPER undo step. Model variant, creative LoRAs,
+the SAME-L decoder LoRA, and loudness processing are shared with the VST3. Prompt, distribution shift, continuation
+length, seed lock, and last generated seed are stored in the REAPER project.
 
 Build and install it for the current Windows user with:
 

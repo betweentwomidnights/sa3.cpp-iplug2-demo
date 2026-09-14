@@ -1167,6 +1167,12 @@ std::string DraggedAudioDirectory(std::string* error = nullptr)
   return draggedAudio;
 }
 
+std::vector<std::string> LoadPromptPoolForLora(const std::string& sourcePath,
+                                               const std::string& displayName)
+{
+  return LoadPromptPoolForLoraSource(sourcePath, displayName);
+}
+
 AudioFileInfo SaveRecordingWav(const RecordingSnapshot& snapshot)
 {
   AudioFileInfo info;

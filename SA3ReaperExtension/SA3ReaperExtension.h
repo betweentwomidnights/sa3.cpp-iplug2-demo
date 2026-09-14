@@ -12,8 +12,10 @@
 
 class MediaTrack;
 class MediaItem;
+class MediaItem_Take;
 class PCM_source;
 class SA3CreativeLoraControl;
+class SA3RenderOptionsControl;
 class SA3SettingsControl;
 
 using namespace iplug;
@@ -30,6 +32,8 @@ enum EControlTags
   kCtrlTagContinue,
   kCtrlTagGenerate,
   kCtrlTagPrompt,
+  kCtrlTagDice,
+  kCtrlTagRenderOptions,
   kCtrlTagCreativeLoras,
   kCtrlTagRun,
   kCtrlTagSettingsButton,
@@ -52,6 +56,7 @@ public:
 private:
   friend class SA3SettingsControl;
   friend class SA3CreativeLoraControl;
+  friend class SA3RenderOptionsControl;
 
   enum class Operation
   {
@@ -84,14 +89,23 @@ private:
 
   SelectionSnapshot ReadSelection() const;
   void SelectOperation(Operation operation);
-  void StartOrCancelGeneration();
+  void StartOrCancelRender();
   void FinishGeneration(gary::SA3RenderResult result);
   void ContinuePendingPeakBuilds();
-  bool ReplaceTimeSelectionWithAudio(MediaTrack* track, double start, double end,
-                                     const std::string& wavPath, const std::string& prompt,
-                                     std::string& error);
-  std::string MakeUniqueOutputPath(std::string& error) const;
+  bool CaptureTakeAudio(MediaItem_Take* take, double start, double end,
+                        gary::RecordingSnapshot& audio, std::string& error) const;
+  bool ReplaceRangeWithAudio(MediaTrack* track, double start, double end,
+                             const std::string& wavPath, const std::string& prompt,
+                             Operation operation, std::string& error);
+  std::string MakeUniqueOutputPath(Operation operation, std::string& error) const;
   void SyncPromptFromUI();
+  void RollPrompt();
+  void SetDistShift(int distShift);
+  void ToggleUseSeed();
+  void SetSeedValue(int64_t seed);
+  void SetContinueSeconds(double seconds);
+  double CurrentSourceLength() const;
+  double EffectiveContinueSeconds() const;
   void RefreshPanel(bool force = false);
   void SetTaggedText(int tag, const char* text);
   void ApplyResponsiveLayout(IGraphics* graphics);
@@ -125,6 +139,7 @@ private:
   struct PendingGeneration
   {
     MediaTrack* track = nullptr;
+    Operation operation = Operation::Generate;
     double start = 0.0;
     double end = 0.0;
     std::string prompt;
@@ -148,6 +163,12 @@ private:
   SelectionSnapshot mSelection;
   bool mHasSelectionSnapshot = false;
   std::string mPrompt;
+  int mDistShift = 0;
+  double mContinueSeconds = 0.0;
+  bool mUseSeed = false;
+  int64_t mSeedValue = 0;
+  bool mHasLastSeed = false;
+  int64_t mLastSeed = 0;
   std::string mPanelStatus = "Set a time selection and choose one destination track.";
   PendingGeneration mPendingGeneration;
   std::vector<PendingPeakBuild> mPendingPeakBuilds;
