@@ -231,7 +231,7 @@ If the demo feels CPU-bound, confirm that `SA3_BUILD_DIR` points at the CUDA-ena
 
 The render request uses the same embedded `libsa3` path for all modes. Text generation, transform, and continue all request outer SAME-L chunked decode (`128` with `32` overlap). Transform and continue also request chunked encode for their source audio. SAME-L sliding-window attention is handled inside `libsa3` from the model metadata, not by a separate plugin UI control.
 
-The demo runs renders in frugal/early-free mode (`keep_models = 0`) so long text2music generations can release T5 before sampling, release DiT before decode, and fully release the autoencoder path after decode. The run button becomes a cancel button during active generation, and plugin teardown asks `libsa3` to cancel cooperatively before joining the worker thread.
+Both iPlug hosts default to frugal/early-free mode so long text2music generations can release T5 before sampling, release DiT before decode, and fully release the autoencoder path after decode. Their Settings screens can opt into keeping models resident between renders for faster repeat work, with the additional GPU-memory cost stated beside the toggle. The run button becomes a cancel button during active generation, and plugin teardown asks `libsa3` to cancel cooperatively before joining the worker thread.
 
 ## DAW scanning notes
 

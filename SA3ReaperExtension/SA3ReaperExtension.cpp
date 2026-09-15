@@ -506,7 +506,7 @@ public:
                IRECT(mRECT.L + 90.f, mRECT.T, mRECT.R, mRECT.T + 24.f));
 
     float y = mRECT.T + 30.f;
-    const IRECT modelCard(mRECT.L, y, mRECT.R, y + 64.f);
+    const IRECT modelCard(mRECT.L, y, mRECT.R, y + 90.f);
     DrawCard(g, modelCard);
     DrawModels(g, modelCard);
     y = modelCard.B + 6.f;
@@ -525,6 +525,7 @@ public:
   {
     if (mModelMenuRect.Contains(x, y)) { OpenModelMenu(); return; }
     if (mModelsFolderRect.Contains(x, y)) { mOwner.ChooseModelsFolder(); SetDirty(false); return; }
+    if (mResidencyToggleRect.Contains(x, y)) { mOwner.SetKeepModelsResident(!mOwner.mKeepModelsResident); SetDirty(false); return; }
     if (mDecoderToggleRect.Contains(x, y)) { mOwner.SetDecoderLoraEnabled(!mOwner.mDecoderLoraEnabled); SetDirty(false); return; }
     if (mDecoderDownloadRect.Contains(x, y)) { mOwner.StartOrCancelDecoderLoraDownload(); SetDirty(false); return; }
     if (mDecoderChooseRect.Contains(x, y)) { mOwner.ChooseDecoderLora(); SetDirty(false); return; }
@@ -616,11 +617,14 @@ private:
     const float right = card.R - 10.f;
     const float gap = 6.f;
     const float width = (right - left - gap) * 0.5f;
-    mModelMenuRect = IRECT(left, card.T + 31.f, left + width, card.B - 7.f);
+    mModelMenuRect = IRECT(left, card.T + 31.f, left + width, card.T + 57.f);
     mModelsFolderRect = IRECT(mModelMenuRect.R + gap, mModelMenuRect.T, right, mModelMenuRect.B);
     const std::string modelLabel = mOwner.mModelVariant + "  v";
     gary::ui::DrawButton(g, mModelMenuRect, modelLabel.c_str(), gary::ui::FontName);
     gary::ui::DrawButton(g, mModelsFolderRect, "models folder", gary::ui::FontName);
+    mResidencyToggleRect = IRECT(left, card.T + 62.f, right, card.B - 5.f);
+    DrawToggle(g, mResidencyToggleRect,
+               "keep models resident (uses GPU memory while idle)", mOwner.mKeepModelsResident);
   }
 
   void OpenModelMenu()
@@ -730,7 +734,7 @@ private:
 
   void ClearHitRects()
   {
-    mModelMenuRect = mModelsFolderRect = {};
+    mModelMenuRect = mModelsFolderRect = mResidencyToggleRect = {};
     mDecoderToggleRect = mDecoderDownloadRect = mDecoderChooseRect = mDecoderClearRect = {};
     mNormalizeToggleRect = mLimiterToggleRect = {};
     mPeakRect = mCeilingRect = mKneeRect = {};
@@ -740,7 +744,7 @@ private:
   SA3ReaperExtension& mOwner;
   Slider mSlider = Slider::None;
   IPopupMenu mModelMenu;
-  IRECT mModelMenuRect, mModelsFolderRect;
+  IRECT mModelMenuRect, mModelsFolderRect, mResidencyToggleRect;
   IRECT mDecoderToggleRect, mDecoderDownloadRect, mDecoderChooseRect, mDecoderClearRect;
   IRECT mNormalizeToggleRect, mLimiterToggleRect;
   IRECT mPeakRect, mCeilingRect, mKneeRect, mDefaultsRect, mRawRect;
@@ -1024,6 +1028,8 @@ void SA3ReaperExtension::OnIdle()
   const bool completed = mRenderService.TakeCompletedResult(result);
   if (completed)
     FinishGeneration(std::move(result));
+  if (completed && !mKeepModelsResident)
+    mRenderService.ReleaseModels();
   ContinuePendingPeakBuilds();
 
   const uint64_t decoderRevision = mDecoderDownloadRevision.load(std::memory_order_acquire);
@@ -1129,6 +1135,7 @@ void SA3ReaperExtension::ReloadSharedSettings(bool scanModels)
   const bool modelLocationChanged = request.modelsDir != mModelsDir || request.variant != mModelVariant;
   mModelsDir = request.modelsDir;
   mModelVariant = request.variant;
+  mKeepModelsResident = request.keepModelsResident;
   mDecoderLoraPath = gary::LoadSetting("decoder_lora_same_l_path");
   mDecoderLoraEnabled = ParseBoolSetting(gary::LoadSetting("decoder_lora_same_l_enabled"), true);
   mPeakNormalizeEnabled = request.peakNormalize;
@@ -1200,6 +1207,17 @@ void SA3ReaperExtension::SelectModelVariant(const char* variant)
   mModelVariant = selected;
   ReloadCreativeLoras();
   mSettingsNotice = "Active model: " + selected + ". Its LoRA registry is loaded.";
+  RefreshPanel(true);
+}
+
+void SA3ReaperExtension::SetKeepModelsResident(bool enabled)
+{
+  mKeepModelsResident = enabled;
+  gary::SaveSetting("keep_models_resident", enabled ? "1" : "0");
+  if (!enabled && !mRenderService.Busy())
+    mRenderService.ReleaseModels();
+  mSettingsNotice = enabled ? "Models will stay resident between renders."
+                            : "Frugal mode enabled; idle GPU memory will be released.";
   RefreshPanel(true);
 }
 

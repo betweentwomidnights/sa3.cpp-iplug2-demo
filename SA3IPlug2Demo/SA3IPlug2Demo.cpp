@@ -348,6 +348,7 @@ class SA3DemoControl final : public IControl
     StatusCopy,
     Settings,
     SettingsClose,
+    ResidencyToggle,
     DecoderToggle,
     DecoderDownload,
     DecoderChoose,
@@ -555,6 +556,7 @@ public:
       case Hit::StatusCopy:    CopyStatusToClipboard(); return;
       case Hit::Settings:
       case Hit::SettingsClose: mSettingsOpen = !mSettingsOpen; SetDirty(false); return;
+      case Hit::ResidencyToggle: mPlugin.SetKeepModelsResident(!mPlugin.KeepModelsResident()); SetDirty(false); return;
       case Hit::DecoderToggle: mPlugin.SetDecoderLoraEnabled(!mPlugin.DecoderLoraEnabled()); SetDirty(false); return;
       case Hit::DecoderDownload:
         if (mPlugin.DecoderLoraDownloading()) mPlugin.CancelModelDownload();
@@ -793,6 +795,7 @@ private:
     if (mSettingsOpen)
     {
       if (mSettingsCloseRect.Contains(x, y)) return {Hit::SettingsClose, 0};
+      if (mResidencyToggleRect.Contains(x, y)) return {Hit::ResidencyToggle, 0};
       if (mDecoderToggleRect.Contains(x, y)) return {Hit::DecoderToggle, 0};
       if (mDecoderDownloadRect.Contains(x, y)) return {Hit::DecoderDownload, 0};
       if (mDecoderChooseRect.Contains(x, y)) return {Hit::DecoderChoose, 0};
@@ -947,6 +950,7 @@ private:
   void DrawSettings(IGraphics& g, const IRECT& bounds)
   {
     using namespace gary::ui;
+    mResidencyToggleRect = {};
     mDecoderToggleRect = mDecoderDownloadRect = mDecoderChooseRect = mDecoderClearRect = {};
     mNormalizeToggleRect = mLimiterToggleRect = {};
     mPeakDbSliderRect = mLimiterCeilingSliderRect = mLimiterKneeSliderRect = {};
@@ -957,6 +961,17 @@ private:
     mSettingsCloseRect = IRECT(bounds.R - 32.f, y + 2.f, bounds.R, y + 26.f);
     DrawButton(g, mSettingsCloseRect, "x", kDemoFont);
     y += 40.f;
+
+    const IRECT lifecycle(bounds.L, y, bounds.R, y + 76.f);
+    g.FillRoundRect(PanelDark(), lifecycle, 5.f);
+    g.DrawRoundRect(FrameSoft(), lifecycle, 5.f);
+    g.DrawText(IText(14.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
+               "model lifecycle", IRECT(lifecycle.L + 12.f, lifecycle.T + 8.f, lifecycle.R - 12.f, lifecycle.T + 30.f));
+    g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               "off releases GPU memory after each render", IRECT(lifecycle.L + 12.f, lifecycle.T + 30.f, lifecycle.R - 12.f, lifecycle.T + 48.f));
+    DrawToggle(g, IRECT(lifecycle.L + 12.f, lifecycle.T + 49.f, lifecycle.R - 12.f, lifecycle.B - 6.f),
+               "keep models resident", mPlugin.KeepModelsResident(), mResidencyToggleRect);
+    y = lifecycle.B + 12.f;
 
     const IRECT decoder(bounds.L, y, bounds.R, y + 176.f);
     g.FillRoundRect(PanelDark(), decoder, 5.f);
@@ -1549,6 +1564,7 @@ private:
   IRECT mDiceRect;
   IRECT mStatusRect, mStatusCopyRect;
   IRECT mModelsBtnRect, mSettingsBtnRect, mSettingsCloseRect;
+  IRECT mResidencyToggleRect;
   IRECT mDecoderToggleRect, mDecoderDownloadRect, mDecoderChooseRect, mDecoderClearRect;
   IRECT mNormalizeToggleRect, mLimiterToggleRect;
   IRECT mPeakDbSliderRect, mLimiterCeilingSliderRect, mLimiterKneeSliderRect;
@@ -1625,6 +1641,7 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
   mLimiterEnabled.store(ParseBoolSetting(gary::LoadSetting("limiter_enabled"), true), std::memory_order_release);
   mLimiterCeilingDb.store(ParseFloatSetting(gary::LoadSetting("limiter_ceiling_db"), -0.3f, -6.f, 0.f), std::memory_order_release);
   mLimiterKnee.store(ParseFloatSetting(gary::LoadSetting("limiter_knee"), 0.8f, 0.1f, 1.f), std::memory_order_release);
+  mKeepModelsResident.store(ParseBoolSetting(gary::LoadSetting("keep_models_resident"), false), std::memory_order_release);
   LoadPersistedCreativeLoras();
 
 #if IPLUG_EDITOR
@@ -1729,6 +1746,12 @@ void SA3IPlug2Demo::OnUIClose()
 
 void SA3IPlug2Demo::OnIdle()
 {
+  if (!KeepModelsResident() && !Busy() && mContext)
+  {
+    if (mWorker.joinable())
+      mWorker.join();
+    TeardownContext();
+  }
   if (auto* ui = GetUI())
     if (auto* control = ui->GetControlWithTag(kCtrlTagMain))
       control->SetDirty(false);
@@ -2520,6 +2543,20 @@ void SA3IPlug2Demo::SetDecoderLoraEnabled(bool enabled)
                     : "decoder correction disabled");
 }
 
+void SA3IPlug2Demo::SetKeepModelsResident(bool enabled)
+{
+  mKeepModelsResident.store(enabled, std::memory_order_release);
+  gary::SaveSetting("keep_models_resident", enabled ? "1" : "0");
+  if (!enabled && !Busy() && mContext)
+  {
+    if (mWorker.joinable())
+      mWorker.join();
+    TeardownContext();
+  }
+  SetStatus(enabled ? "models will stay resident between renders"
+                    : "frugal mode enabled; idle GPU memory released");
+}
+
 std::string SA3IPlug2Demo::DecoderLoraPath() const
 {
   std::lock_guard<std::mutex> lock(mDecoderLoraMutex);
@@ -2931,6 +2968,7 @@ SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
   input.limiter = LimiterEnabled();
   input.limiterCeilingDb = LimiterCeilingDb();
   input.limiterKnee = LimiterKnee();
+  input.keepModelsResident = KeepModelsResident();
 
   // Build the prompt actually sent: base + optional " <bpm> bpm" + optional " C minor".
   // Mirrors gary4juce SA3UI (host tempo + key/scale get appended to the text prompt).
@@ -3054,7 +3092,8 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   req.seed = input.useSeed ? input.seed : -1;
   req.cfg_scale = input.cfgScale;
   req.generation_tail_padding_seconds = generationTailSeconds;
-  req.residency = SA3_RESIDENCY_FRUGAL_V1;
+  req.residency = input.keepModelsResident ? SA3_RESIDENCY_RESIDENT_V1
+                                          : SA3_RESIDENCY_FRUGAL_V1;
   req.loudness.peak_normalize = input.peakNormalize ? 1 : 0;
   req.loudness.peak_normalize_db = input.peakNormalizeDb;
   req.loudness.limiter = input.limiter ? 1 : 0;

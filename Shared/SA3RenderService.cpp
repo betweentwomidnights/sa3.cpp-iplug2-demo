@@ -259,6 +259,7 @@ SA3RenderRequest LoadSharedRenderRequest(std::string prompt,
   request.limiter = ParseBool(LoadSetting("limiter_enabled"), true);
   request.limiterCeilingDb = ParseFloat(LoadSetting("limiter_ceiling_db"), -0.3f, -6.f, 0.f);
   request.limiterKnee = ParseFloat(LoadSetting("limiter_knee"), 0.8f, 0.1f, 1.f);
+  request.keepModelsResident = ParseBool(LoadSetting("keep_models_resident"), false);
 
   const auto creativeLoras = LoadCreativeLoraRegistry(request.variant);
   for (const auto& lora : creativeLoras)
@@ -382,6 +383,15 @@ void SA3RenderService::Cancel()
   SetStatus("cancelling render");
 }
 
+void SA3RenderService::ReleaseModels()
+{
+  if (Busy())
+    return;
+  if (mWorker.joinable())
+    mWorker.join();
+  TeardownContext();
+}
+
 std::string SA3RenderService::Status() const
 {
   std::lock_guard<std::mutex> lock(mStateMutex);
@@ -462,7 +472,8 @@ void SA3RenderService::WorkerMain(uint64_t requestId, SA3RenderRequest request)
   generation.seed = request.seed;
   generation.cfg_scale = request.cfgScale;
   generation.distribution_shift = static_cast<sa3_distribution_shift_v1>(std::clamp(request.distShift, 0, 3));
-  generation.residency = SA3_RESIDENCY_FRUGAL_V1;
+  generation.residency = request.keepModelsResident ? SA3_RESIDENCY_RESIDENT_V1
+                                                    : SA3_RESIDENCY_FRUGAL_V1;
   generation.loudness.peak_normalize = request.peakNormalize ? 1 : 0;
   generation.loudness.peak_normalize_db = request.peakNormalizeDb;
   generation.loudness.limiter = request.limiter ? 1 : 0;

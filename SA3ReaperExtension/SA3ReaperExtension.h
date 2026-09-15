@@ -114,6 +114,7 @@ private:
   void ReloadSharedSettings(bool scanModels = true);
   void ChooseModelsFolder();
   void SelectModelVariant(const char* variant);
+  void SetKeepModelsResident(bool enabled);
   void SetDecoderLoraEnabled(bool enabled);
   void ChooseDecoderLora();
   void ClearDecoderLora();
@@ -181,6 +182,7 @@ private:
   std::string mModelVariant = "medium";
   bool mMediumModelsAvailable = false;
   bool mSmallModelsAvailable = false;
+  bool mKeepModelsResident = false;
   std::string mDecoderLoraPath;
   bool mDecoderLoraEnabled = true;
   bool mPeakNormalizeEnabled = true;

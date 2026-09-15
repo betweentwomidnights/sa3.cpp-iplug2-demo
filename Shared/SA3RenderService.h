@@ -47,6 +47,7 @@ struct SA3RenderRequest
   bool limiter = true;
   float limiterCeilingDb = -0.3f;
   float limiterKnee = 0.8f;
+  bool keepModelsResident = false;
 };
 
 struct SA3RenderResult
@@ -75,6 +76,7 @@ public:
 
   bool StartRender(SA3RenderRequest request);
   void Cancel();
+  void ReleaseModels();
   bool Busy() const noexcept { return mBusy.load(std::memory_order_acquire); }
   float Progress() const noexcept { return mProgress.load(std::memory_order_acquire); }
   std::string Status() const;
