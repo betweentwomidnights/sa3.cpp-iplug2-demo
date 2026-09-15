@@ -176,9 +176,9 @@ Set `SA3_MODELS_DIR` at runtime to override the fallback model directory. The in
 also download the `medium` or `small-music` GGUF file set into `Documents/sa3-iplug2-demo/models`, point at an
 existing folder, and persist that folder plus the selected variant.
 
-### REAPER extension UX prototype
+### REAPER extension
 
-The repository also builds an early REAPER extension target. It registers Transform, Continue, and Generate actions,
+The repository also builds a REAPER extension target. It registers Transform, Continue, and Generate actions,
 adds Transform and Continue to the media-item context menu, and opens a dockable panel that follows the selected item,
 destination track, time selection, tempo, and time signature.
 
@@ -251,7 +251,7 @@ Copy-Item -LiteralPath .\build\out\SA3IPlug2Demo.vst3 -Destination $userVst3 -Re
 The current validated metadata is:
 
 - vendor: `the collabage patch`
-- version: `0.3.0`
+- version: `0.4.0`
 - VST3 validator: `47 tests passed, 0 tests failed`
 
 ## Playback crackle triage
