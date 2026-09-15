@@ -17,7 +17,14 @@
 
 #define SHARED_RESOURCES_SUBPATH "SA3IPlug2Demo"
 
+// The standalone is an output-only audition host. Opening the default microphone while
+// ProcessBlock monitors input creates an immediate acoustic feedback loop on speakers.
+// Plug-in builds keep their mono/stereo inputs for DAW capture and Transform/Continue.
+#if defined(APP_API)
+#define PLUG_CHANNEL_IO "0-2"
+#else
 #define PLUG_CHANNEL_IO "1-1 2-2"
+#endif
 
 #define PLUG_LATENCY 0
 #define PLUG_TYPE 0
