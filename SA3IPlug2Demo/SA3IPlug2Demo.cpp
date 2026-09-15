@@ -3475,22 +3475,19 @@ void SA3IPlug2Demo::SetOutputStatus(const std::string& text)
   mOutputStatus = text;
 }
 
-void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate, int keepSamples)
+void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate)
 {
   if (!samples || nSamp <= 0 || nCh <= 0)
     return;
 
-  // keepSamples < 0 keeps everything; otherwise take the first keepSamples per channel (loop trim), reading
-  // with the source's full nSamp stride so the planar channel offsets stay correct.
-  const int outSamps = (keepSamples > 0 && keepSamples < nSamp) ? keepSamples : nSamp;
-  std::vector<std::vector<float>> next((size_t)nCh, std::vector<float>((size_t)outSamps, 0.f));
+  std::vector<std::vector<float>> next((size_t)nCh, std::vector<float>((size_t)nSamp, 0.f));
   for (int c = 0; c < nCh; ++c)
-    std::copy(samples + (size_t)c * nSamp, samples + (size_t)c * nSamp + outSamps, next[(size_t)c].begin());
+    std::copy(samples + (size_t)c * nSamp, samples + (size_t)c * nSamp + nSamp, next[(size_t)c].begin());
 
   {
     std::lock_guard<std::mutex> lock(mOutputMutex);
     mOutputBuffer = std::move(next);
-    mOutputSamples = outSamps;
+    mOutputSamples = nSamp;
     mOutputSampleRate = std::max(1, sampleRate);
     // resets playhead to 0 and stops playback: the swap ends the previous audition cleanly (user's preference).
     RebuildOutputPlaybackBufferFromNativeLocked(mHostSampleRate.load(std::memory_order_acquire));
@@ -3498,7 +3495,7 @@ void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int
   mOutputRevision.fetch_add(1, std::memory_order_acq_rel);
   char status[128] = {};
   std::snprintf(status, sizeof status, "output %.2fs @ %d Hz ready",
-                (double)outSamps / std::max(1, sampleRate), std::max(1, sampleRate));
+                (double)nSamp / std::max(1, sampleRate), std::max(1, sampleRate));
   SetOutputStatus(status);
 }
 

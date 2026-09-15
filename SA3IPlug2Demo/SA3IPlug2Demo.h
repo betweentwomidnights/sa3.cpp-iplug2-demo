@@ -254,7 +254,7 @@ private:
   void SetStatus(const std::string& text);
   void SetSourceStatus(const std::string& text);
   void SetOutputStatus(const std::string& text);
-  void InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate, int keepSamples = -1);
+  void InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate);
   gary::RecordingSnapshot SourceSnapshotForSA3(const RenderInput& input) const;
   static std::string NormalizeDroppedPath(const char* rawPath);
 
