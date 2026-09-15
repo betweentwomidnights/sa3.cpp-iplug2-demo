@@ -67,6 +67,10 @@ Generated output is stored at the sample rate reported by `libsa3`. `myOutput.wa
 
 Dropped source audio is decoded from WAV/MP3 and converted to the current host rate before it is captured into the source buffer. Host-recorded source audio is already at the host rate. `libsa3` receives the source buffer with an explicit sample rate for transform/continue.
 
+The standalone app opens output-only to avoid monitoring the default microphone back through the
+speakers. Use a dropped audio file as its Transform/Continue source; DAW plug-in builds retain their
+mono/stereo inputs for host capture.
+
 ## Build
 
 The easiest path is to clone this demo and `sa3.cpp` as sibling folders. The demo's CMake defaults look for
