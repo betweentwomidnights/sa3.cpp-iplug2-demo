@@ -2,7 +2,7 @@
 
 #include "DemoAudioFileStore.h"
 #include "IPlug_include_in_plug_hdr.h"
-#include "libsa3.h"
+#include "libsa3_v1.h"
 
 #include <algorithm>
 #include <array>
@@ -185,6 +185,9 @@ public:
   bool ImportDecoderLoraFromDialog();
   void ClearDecoderLoraSelection();
 
+  bool KeepModelsResident() const noexcept { return mKeepModelsResident.load(std::memory_order_acquire); }
+  void SetKeepModelsResident(bool enabled);
+
   bool PeakNormalizeEnabled() const noexcept { return mPeakNormalizeEnabled.load(std::memory_order_acquire); }
   float PeakNormalizeDb() const noexcept { return mPeakNormalizeDb.load(std::memory_order_acquire); }
   bool LimiterEnabled() const noexcept { return mLimiterEnabled.load(std::memory_order_acquire); }
@@ -232,6 +235,7 @@ private:
     bool limiter = true;
     float limiterCeilingDb = -0.3f;
     float limiterKnee = 0.8f;
+    bool keepModelsResident = false;
   };
 
   static int ModeIndex(RenderMode mode) noexcept;
@@ -254,7 +258,7 @@ private:
   void SetStatus(const std::string& text);
   void SetSourceStatus(const std::string& text);
   void SetOutputStatus(const std::string& text);
-  void InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate, int keepSamples = -1);
+  void InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate);
   gary::RecordingSnapshot SourceSnapshotForSA3(const RenderInput& input) const;
   static std::string NormalizeDroppedPath(const char* rawPath);
 
@@ -327,6 +331,7 @@ private:
   std::atomic<bool> mLimiterEnabled{true};
   std::atomic<float> mLimiterCeilingDb{-0.3f};
   std::atomic<float> mLimiterKnee{0.8f};
+  std::atomic<bool> mKeepModelsResident{false};
 
   std::atomic<int> mHostSampleRate{44100};
   std::thread mWorker;

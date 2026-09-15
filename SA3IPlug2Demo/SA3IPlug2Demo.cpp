@@ -37,7 +37,7 @@
 
 namespace
 {
-constexpr const char* kDemoFont = "DemoRoboto";
+constexpr const char* kDemoFont = gary::ui::FontName;
 constexpr int kCtrlTagMain = 1000;
 constexpr uint32_t kPluginStateMagic = 0x53334133u; // "SA3" state chunk
 constexpr uint32_t kPluginStateVersion = 1u;
@@ -104,18 +104,6 @@ float ParseFloatSetting(const std::string& text, float fallback, float lo, float
   return std::clamp(parsed, lo, hi);
 }
 
-int ParseIntSetting(const std::string& text, int fallback, int lo, int hi) noexcept
-{
-  if (text.empty()) return fallback;
-  errno = 0;
-  char* end = nullptr;
-  const long parsed = std::strtol(text.c_str(), &end, 10);
-  if (end == text.c_str() || (end && *end != '\0') || errno == ERANGE) return fallback;
-  if (parsed <= static_cast<long>(lo)) return lo;
-  if (parsed >= static_cast<long>(hi)) return hi;
-  return static_cast<int>(parsed);
-}
-
 std::string SettingFloat(float value)
 {
   char text[32] = {};
@@ -156,27 +144,21 @@ std::vector<float> ToPlanar(const gary::RecordingSnapshot& snapshot)
 
 struct Sa3Api
 {
-  using InitFn = sa3_context* (*)(const sa3_config*, char*, int);
-  using GenerateExFn = int (*)(sa3_context*, const sa3_request_ex*, sa3_audio*, char*, int);
-  using FreeAudioFn = void (*)(sa3_audio*);
-  using FreeContextFn = void (*)(sa3_context*);
+  using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
 
 #ifdef _WIN32
   HMODULE module = nullptr;
 #elif defined(__APPLE__)
   void* module = nullptr;
 #endif
-  InitFn init = nullptr;
-  GenerateExFn generateEx = nullptr;
-  FreeAudioFn freeAudio = nullptr;
-  FreeContextFn freeContext = nullptr;
+  const sa3_api_v1* api = nullptr;
 
   bool Ready() const noexcept
   {
 #ifdef _WIN32
-    return module && init && generateEx && freeAudio && freeContext;
+    return module && api;
 #elif defined(__APPLE__)
-    return module && init && generateEx && freeAudio && freeContext;
+    return module && api;
 #else
     return false;
 #endif
@@ -200,14 +182,14 @@ struct Sa3Api
       return false;
     }
 
-    if (!Resolve(init, "sa3_init", error) ||
-        !Resolve(generateEx, "sa3_generate_ex", error) ||
-        !Resolve(freeAudio, "sa3_free_audio", error) ||
-        !Resolve(freeContext, "sa3_free", error))
+    GetApiFn getApi = nullptr;
+    if (!Resolve(getApi, "sa3_get_api", error)) return false;
+    api = getApi(SA3_ABI_VERSION_1);
+    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < SA3_API_V1_MIN_SIZE)
     {
+      error = "libsa3 does not provide the complete C ABI V1 table";
       return false;
     }
-
     return true;
 #elif defined(__APPLE__)
     const std::string dir = ModuleDirectory(error);
@@ -223,14 +205,14 @@ struct Sa3Api
       return false;
     }
 
-    if (!Resolve(init, "sa3_init", error) ||
-        !Resolve(generateEx, "sa3_generate_ex", error) ||
-        !Resolve(freeAudio, "sa3_free_audio", error) ||
-        !Resolve(freeContext, "sa3_free", error))
+    GetApiFn getApi = nullptr;
+    if (!Resolve(getApi, "sa3_get_api", error)) return false;
+    api = getApi(SA3_ABI_VERSION_1);
+    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < SA3_API_V1_MIN_SIZE)
     {
+      error = "libsa3 does not provide the complete C ABI V1 table";
       return false;
     }
-
     return true;
 #else
     error = "runtime libsa3 loading is only implemented for Windows/macOS in this demo";
@@ -366,6 +348,7 @@ class SA3DemoControl final : public IControl
     StatusCopy,
     Settings,
     SettingsClose,
+    ResidencyToggle,
     DecoderToggle,
     DecoderDownload,
     DecoderChoose,
@@ -573,6 +556,7 @@ public:
       case Hit::StatusCopy:    CopyStatusToClipboard(); return;
       case Hit::Settings:
       case Hit::SettingsClose: mSettingsOpen = !mSettingsOpen; SetDirty(false); return;
+      case Hit::ResidencyToggle: mPlugin.SetKeepModelsResident(!mPlugin.KeepModelsResident()); SetDirty(false); return;
       case Hit::DecoderToggle: mPlugin.SetDecoderLoraEnabled(!mPlugin.DecoderLoraEnabled()); SetDirty(false); return;
       case Hit::DecoderDownload:
         if (mPlugin.DecoderLoraDownloading()) mPlugin.CancelModelDownload();
@@ -811,6 +795,7 @@ private:
     if (mSettingsOpen)
     {
       if (mSettingsCloseRect.Contains(x, y)) return {Hit::SettingsClose, 0};
+      if (mResidencyToggleRect.Contains(x, y)) return {Hit::ResidencyToggle, 0};
       if (mDecoderToggleRect.Contains(x, y)) return {Hit::DecoderToggle, 0};
       if (mDecoderDownloadRect.Contains(x, y)) return {Hit::DecoderDownload, 0};
       if (mDecoderChooseRect.Contains(x, y)) return {Hit::DecoderChoose, 0};
@@ -895,11 +880,7 @@ private:
 
   void DrawTab(IGraphics& g, const IRECT& bounds, const char* label, bool active)
   {
-    using namespace gary::ui;
-    g.FillRoundRect(active ? Red() : ButtonFill(), bounds, 4.f);
-    g.DrawRoundRect(active ? Red() : Frame(), bounds, 4.f);
-    g.DrawText(IText(13.f, active ? COLOR_BLACK : COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle),
-               label, bounds.GetPadded(-4.f));
+    gary::ui::DrawTab(g, bounds, label, kDemoFont, active);
   }
 
   void DrawTabs(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)
@@ -969,6 +950,7 @@ private:
   void DrawSettings(IGraphics& g, const IRECT& bounds)
   {
     using namespace gary::ui;
+    mResidencyToggleRect = {};
     mDecoderToggleRect = mDecoderDownloadRect = mDecoderChooseRect = mDecoderClearRect = {};
     mNormalizeToggleRect = mLimiterToggleRect = {};
     mPeakDbSliderRect = mLimiterCeilingSliderRect = mLimiterKneeSliderRect = {};
@@ -979,6 +961,17 @@ private:
     mSettingsCloseRect = IRECT(bounds.R - 32.f, y + 2.f, bounds.R, y + 26.f);
     DrawButton(g, mSettingsCloseRect, "x", kDemoFont);
     y += 40.f;
+
+    const IRECT lifecycle(bounds.L, y, bounds.R, y + 76.f);
+    g.FillRoundRect(PanelDark(), lifecycle, 5.f);
+    g.DrawRoundRect(FrameSoft(), lifecycle, 5.f);
+    g.DrawText(IText(14.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
+               "model lifecycle", IRECT(lifecycle.L + 12.f, lifecycle.T + 8.f, lifecycle.R - 12.f, lifecycle.T + 30.f));
+    g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+               "off releases GPU memory after each render", IRECT(lifecycle.L + 12.f, lifecycle.T + 30.f, lifecycle.R - 12.f, lifecycle.T + 48.f));
+    DrawToggle(g, IRECT(lifecycle.L + 12.f, lifecycle.T + 49.f, lifecycle.R - 12.f, lifecycle.B - 6.f),
+               "keep models resident", mPlugin.KeepModelsResident(), mResidencyToggleRect);
+    y = lifecycle.B + 12.f;
 
     const IRECT decoder(bounds.L, y, bounds.R, y + 176.f);
     g.FillRoundRect(PanelDark(), decoder, 5.f);
@@ -1571,6 +1564,7 @@ private:
   IRECT mDiceRect;
   IRECT mStatusRect, mStatusCopyRect;
   IRECT mModelsBtnRect, mSettingsBtnRect, mSettingsCloseRect;
+  IRECT mResidencyToggleRect;
   IRECT mDecoderToggleRect, mDecoderDownloadRect, mDecoderChooseRect, mDecoderClearRect;
   IRECT mNormalizeToggleRect, mLimiterToggleRect;
   IRECT mPeakDbSliderRect, mLimiterCeilingSliderRect, mLimiterKneeSliderRect;
@@ -1647,6 +1641,7 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
   mLimiterEnabled.store(ParseBoolSetting(gary::LoadSetting("limiter_enabled"), true), std::memory_order_release);
   mLimiterCeilingDb.store(ParseFloatSetting(gary::LoadSetting("limiter_ceiling_db"), -0.3f, -6.f, 0.f), std::memory_order_release);
   mLimiterKnee.store(ParseFloatSetting(gary::LoadSetting("limiter_knee"), 0.8f, 0.1f, 1.f), std::memory_order_release);
+  mKeepModelsResident.store(ParseBoolSetting(gary::LoadSetting("keep_models_resident"), false), std::memory_order_release);
   LoadPersistedCreativeLoras();
 
 #if IPLUG_EDITOR
@@ -1751,6 +1746,12 @@ void SA3IPlug2Demo::OnUIClose()
 
 void SA3IPlug2Demo::OnIdle()
 {
+  if (!KeepModelsResident() && !Busy() && mContext)
+  {
+    if (mWorker.joinable())
+      mWorker.join();
+    TeardownContext();
+  }
   if (auto* ui = GetUI())
     if (auto* control = ui->GetControlWithTag(kCtrlTagMain))
       control->SetDirty(false);
@@ -1888,7 +1889,7 @@ void SA3IPlug2Demo::TeardownContext()
   if (mContext)
   {
     if (const Sa3Api* sa3 = LoadedSa3Api())
-      sa3->freeContext(mContext);
+      sa3->api->context_destroy(mContext);
     mContext = nullptr;
   }
 }
@@ -1906,6 +1907,10 @@ bool SA3IPlug2Demo::UseModelsFolder(const std::string& dir, const std::string& v
     return false;
   }
 
+  const bool variantChanged = ModelVariant() != v;
+  if (variantChanged && mCreativeLorasDirty.load(std::memory_order_acquire))
+    PersistCreativeLoras();
+
   {
     std::lock_guard<std::mutex> lock(mModelsMutex);
     mModelsDirSetting = dir;
@@ -1921,6 +1926,8 @@ bool SA3IPlug2Demo::UseModelsFolder(const std::string& dir, const std::string& v
     gary::SaveSetting("models_dir", dir);
     gary::SaveSetting("variant", v);
   }
+  if (variantChanged)
+    LoadPersistedCreativeLoras();
   SetStatus("models ready (" + v + "): " + dir);
   return true;
 }
@@ -1942,6 +1949,8 @@ bool SA3IPlug2Demo::SelectVariant(const std::string& variant)
   }
 
   bool changed = false;
+  if (ModelVariant() != v && mCreativeLorasDirty.load(std::memory_order_acquire))
+    PersistCreativeLoras();
   {
     std::lock_guard<std::mutex> lock(mModelsMutex);
     if (mModelVariant != v)
@@ -1955,6 +1964,7 @@ bool SA3IPlug2Demo::SelectVariant(const std::string& variant)
     if (!mBusy.load(std::memory_order_acquire))
       TeardownContext();   // the loaded context is the old variant — reload on next render
     gary::SaveSetting("variant", v);
+    LoadPersistedCreativeLoras();
   }
   mModelsPresent.store(true, std::memory_order_release);
   SetStatus("active model: " + v);
@@ -2197,17 +2207,15 @@ gary::AudioFileInfo SA3IPlug2Demo::CreateOutputDragCopy()
 
 void SA3IPlug2Demo::LoadPersistedCreativeLoras()
 {
-  const int count = ParseIntSetting(gary::LoadSetting("creative_lora_count"), 0, 0, kMaxPersistedLoras);
+  const auto savedLoras = gary::LoadCreativeLoraRegistry(ModelVariant());
   std::vector<LoraSlot> restored;
-  restored.reserve(static_cast<size_t>(count));
+  restored.reserve(savedLoras.size());
   int unavailable = 0;
-  for (int i = 0; i < count; ++i)
+  for (const auto& saved : savedLoras)
   {
-    const std::string prefix = "creative_lora_" + std::to_string(i) + "_";
-    const std::string path = gary::LoadSetting(prefix + "path");
-    if (path.empty())
+    if (saved.path.empty())
       continue;
-    const auto info = gary::ImportLoraFile(path);
+    const auto info = gary::ImportLoraFile(saved.path);
     if (!info.ok)
     {
       ++unavailable;
@@ -2217,14 +2225,15 @@ void SA3IPlug2Demo::LoadPersistedCreativeLoras()
     slot.path = info.path;
     slot.name = info.name.empty() ? FileNameFromPath(info.path) : info.name;
     slot.prompts = info.prompts;
-    slot.strength = ParseFloatSetting(gary::LoadSetting(prefix + "strength"), 1.f, 0.f, 2.f);
-    slot.enabled = ParseBoolSetting(gary::LoadSetting(prefix + "enabled"), true);
+    slot.strength = saved.strength;
+    slot.enabled = saved.enabled;
     restored.push_back(std::move(slot));
   }
   {
     std::lock_guard<std::mutex> lock(mLoraMutex);
     mLoras = std::move(restored);
   }
+  mCreativeLorasDirty.store(false, std::memory_order_release);
   if (unavailable > 0)
     SetStatus(std::to_string(unavailable) + " remembered LoRA" + (unavailable == 1 ? " is" : "s are") + " unavailable");
 }
@@ -2237,16 +2246,12 @@ void SA3IPlug2Demo::PersistCreativeLoras()
     snapshot.assign(mLoras.begin(), mLoras.begin()
                     + static_cast<ptrdiff_t>(std::min<size_t>(mLoras.size(), kMaxPersistedLoras)));
   }
-  bool saved = true;
-  for (size_t i = 0; i < snapshot.size(); ++i)
-  {
-    const std::string prefix = "creative_lora_" + std::to_string(i) + "_";
-    saved = gary::SaveSetting(prefix + "path", snapshot[i].path) && saved;
-    saved = gary::SaveSetting(prefix + "strength", SettingFloat(snapshot[i].strength)) && saved;
-    saved = gary::SaveSetting(prefix + "enabled", snapshot[i].enabled ? "1" : "0") && saved;
-  }
-  // Write the count last so an interrupted add never exposes a half-written slot.
-  saved = gary::SaveSetting("creative_lora_count", std::to_string(snapshot.size())) && saved;
+  std::vector<gary::PersistedCreativeLora> savedLoras;
+  savedLoras.reserve(snapshot.size());
+  for (const auto& slot : snapshot)
+    savedLoras.push_back({slot.path, slot.strength, slot.enabled});
+
+  const bool saved = gary::SaveCreativeLoraRegistry(ModelVariant(), savedLoras);
   mCreativeLorasDirty.store(!saved, std::memory_order_release);
 }
 
@@ -2536,6 +2541,20 @@ void SA3IPlug2Demo::SetDecoderLoraEnabled(bool enabled)
   SetStatus(enabled ? (ModelVariant() == "medium" ? "SAME-L decoder correction enabled"
                                                    : "decoder correction saved for medium (SAME-L only)")
                     : "decoder correction disabled");
+}
+
+void SA3IPlug2Demo::SetKeepModelsResident(bool enabled)
+{
+  mKeepModelsResident.store(enabled, std::memory_order_release);
+  gary::SaveSetting("keep_models_resident", enabled ? "1" : "0");
+  if (!enabled && !Busy() && mContext)
+  {
+    if (mWorker.joinable())
+      mWorker.join();
+    TeardownContext();
+  }
+  SetStatus(enabled ? "models will stay resident between renders"
+                    : "frugal mode enabled; idle GPU memory released");
 }
 
 std::string SA3IPlug2Demo::DecoderLoraPath() const
@@ -2949,6 +2968,7 @@ SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
   input.limiter = LimiterEnabled();
   input.limiterCeilingDb = LimiterCeilingDb();
   input.limiterKnee = LimiterKnee();
+  input.keepModelsResident = KeepModelsResident();
 
   // Build the prompt actually sent: base + optional " <bpm> bpm" + optional " C minor".
   // Mirrors gary4juce SA3UI (host tempo + key/scale get appended to the text prompt).
@@ -3018,24 +3038,28 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
     return;
   }
 
-  char err[1024] = {};
+  sa3_error_v1 error = {};
+  error.size = sizeof(error);
+  sa3->api->error_init(&error);
   if (!mContext)
   {
     SetStatus("loading libsa3 model (" + input.variant + ")");
-    sa3_config cfg = {};
+    sa3_context_config_v1 cfg = {};
+    cfg.size = sizeof(cfg);
+    sa3->api->context_config_init(&cfg);
     const std::string models = ModelsDir();
     cfg.models_dir = models.c_str();
     cfg.variant = input.variant.c_str();
-    cfg.encoding = "f16";
-    mContext = sa3->init(&cfg, err, (int)sizeof err);
-    if (!mContext)
+    cfg.dit_encoding = "f16";
+    const sa3_status_v1 loadStatus = sa3->api->context_create(&cfg, &mContext, &error);
+    if (loadStatus != SA3_STATUS_OK_V1)
     {
-      finish(std::string("sa3_init failed: ") + err);
+      finish(std::string("sa3 context failed: ") + error.message);
       return;
     }
     if (cancelled())
     {
-      sa3->freeContext(mContext);
+      sa3->api->context_destroy(mContext);
       mContext = nullptr;
       mCancelRequested.store(false, std::memory_order_release);
       finish("render cancelled", true);
@@ -3046,72 +3070,72 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
   gary::RecordingSnapshot source = SourceSnapshotForSA3(input);
   std::vector<float> planar = ToPlanar(source);
 
-  // Loop mode (Text only): generate loop_duration + a little pad with NO schedule ending, then trim to the
-  // exact bar length in the plugin. libsa3 has no target_n_samp, so this mirrors sa3-server /generate/loop
-  // demo-side (frames carry the pad; duration_padding_sec=0). loopTargetSamples>0 requests the front trim.
-  int loopTargetSamples = 0;
-  double genSeconds = (double)input.durationSeconds;
+  // Loop mode asks V1 for the exact bar length and gives the model two seconds of tail headroom.
+  double outputSeconds = (double)input.durationSeconds;
+  float generationTailSeconds = 6.0f;
   if (input.mode == RenderMode::Text && input.loopBars > 0 && input.bpm > 0.0)
   {
     const double secondsPerBar = (60.0 / input.bpm) * 4.0;   // 4/4
-    const double loopSeconds = secondsPerBar * (double)input.loopBars;
-    genSeconds = loopSeconds + 2.0;                          // ~2s headroom, trimmed away below
-    loopTargetSamples = std::max(1, (int)std::llround(loopSeconds * 44100.0));
+    outputSeconds = secondsPerBar * (double)input.loopBars;
+    generationTailSeconds = 2.0f;
   }
 
-  sa3_request_ex req = {};
-  req.request.prompt = input.prompt.c_str();
-  int frames = std::max(1, (int)(genSeconds * 44100.0 / 4096.0 + 0.5));
-  if (input.variant == "small-music" || input.variant == "small-sfx")
-    frames = std::max(2, frames & ~1);   // SAME-S needs an even frame count
-  req.request.frames = frames;
-  req.request.steps = input.steps;
-  req.request.seed = input.useSeed ? input.seed : -1;
-  req.request.cfg_scale = input.cfgScale;
-  req.request.duration_padding_sec = (input.mode == RenderMode::Text && loopTargetSamples == 0) ? 6.0f : 0.0f;
-  req.request.keep_models = 0;
-  req.request.loudness.set = 1;
-  req.request.loudness.peak_normalize = input.peakNormalize ? 1 : 0;
-  req.request.loudness.peak_normalize_db = input.peakNormalizeDb;
-  req.request.loudness.limiter = input.limiter ? 1 : 0;
-  req.request.loudness.limiter_ceiling_db = input.limiterCeilingDb;
-  req.request.loudness.limiter_knee = input.limiterKnee;
+  sa3_request_v1 req = {};
+  req.size = sizeof(req);
+  sa3->api->request_init(&req);
+  req.operation = input.mode == RenderMode::Transform ? SA3_OPERATION_TRANSFORM_V1
+                : input.mode == RenderMode::Continue ? SA3_OPERATION_CONTINUE_V1
+                                                      : SA3_OPERATION_GENERATE_V1;
+  req.prompt = input.prompt.c_str();
+  req.duration_seconds = outputSeconds;
+  req.steps = input.steps;
+  req.seed = input.useSeed ? input.seed : -1;
+  req.cfg_scale = input.cfgScale;
+  req.generation_tail_padding_seconds = generationTailSeconds;
+  req.residency = input.keepModelsResident ? SA3_RESIDENCY_RESIDENT_V1
+                                          : SA3_RESIDENCY_FRUGAL_V1;
+  req.loudness.peak_normalize = input.peakNormalize ? 1 : 0;
+  req.loudness.peak_normalize_db = input.peakNormalizeDb;
+  req.loudness.limiter = input.limiter ? 1 : 0;
+  req.loudness.limiter_ceiling_db = input.limiterCeilingDb;
+  req.loudness.limiter_knee = input.limiterKnee;
   // Intentionally not user-facing: these neutral values keep latent-domain controls out of this VST3.
-  req.request.loudness.latent_rescale = 1.0f;
-  req.request.loudness.latent_shift = 0.0f;
-  static const char* kDistShiftNames[4] = {"LogSNR", "Flux", "Full", "None"};   // static: outlives the call
-  req.request.dist_shift = kDistShiftNames[std::clamp(input.distShift, 0, 3)];   // params[4] stay 0 -> type defaults
+  req.loudness.latent_rescale = 1.0f;
+  req.loudness.latent_shift = 0.0f;
+  req.distribution_shift = static_cast<sa3_distribution_shift_v1>(std::clamp(input.distShift, 0, 3));
   req.encode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
   req.encode_overlap = 32;
   req.decode_chunk_size = 128;
   req.decode_overlap = 32;
 
-  std::vector<const char*> loraNames;
-  std::vector<float> loraStrengths;
-  loraNames.reserve(input.loras.size());
-  loraStrengths.reserve(input.loras.size());
+  std::vector<sa3_adapter_v1> adapters;
+  adapters.reserve(input.loras.size());
   for (const auto& lora : input.loras)
   {
-    loraNames.push_back(lora.path.c_str());
-    loraStrengths.push_back(lora.strength);
+    sa3_adapter_v1 adapter = {};
+    adapter.size = sizeof(adapter);
+    sa3->api->adapter_init(&adapter);
+    adapter.path_or_name = lora.path.c_str();
+    adapter.strength = lora.strength;
+    adapters.push_back(adapter);
   }
-  req.request.n_loras = (int)loraNames.size();
-  req.request.lora_names = loraNames.empty() ? nullptr : loraNames.data();
-  req.request.lora_strengths = loraStrengths.empty() ? nullptr : loraStrengths.data();
+  req.adapters = adapters.empty() ? nullptr : adapters.data();
+  req.adapter_count = static_cast<uint32_t>(adapters.size());
 
   struct ProgressUser { SA3IPlug2Demo* self; uint64_t requestId; } progressUser{this, requestId};
-  req.request.user = &progressUser;
-  req.request.on_progress = [](void* user, const char* stage, int step, int total, float fraction) {
+  req.callback_user = &progressUser;
+  req.on_progress = [](void* user, const sa3_progress_v1* update) {
     auto* u = static_cast<ProgressUser*>(user);
-    if (!u || u->requestId != u->self->mRequestId.load(std::memory_order_acquire))
+    if (!u || !update || u->requestId != u->self->mRequestId.load(std::memory_order_acquire))
       return;
-    u->self->mProgress.store(fraction, std::memory_order_release);
+    u->self->mProgress.store(update->fraction, std::memory_order_release);
     char text[160] = {};
-    std::snprintf(text, sizeof text, "%s %d/%d %.0f%%", stage ? stage : "render", step, total, fraction * 100.0f);
+    std::snprintf(text, sizeof text, "%s %d/%d %.0f%%",
+                  update->stage_name ? update->stage_name : "render",
+                  update->step, update->total, update->fraction * 100.0f);
     u->self->SetStatus(text);
   };
-  req.cancel_user = &progressUser;
-  req.should_cancel = [](void* user) -> int {
+  req.should_cancel = [](void* user) -> int32_t {
     auto* u = static_cast<ProgressUser*>(user);
     if (!u || !u->self)
       return 1;
@@ -3121,48 +3145,47 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
 
   if (input.mode == RenderMode::Transform)
   {
-    req.init_audio.mode = SA3_INIT_AUDIO_A2A;
-    req.init_audio.samples = planar.data();
-    req.init_audio.n_samp = source.numSamples;
-    req.init_audio.n_ch = (int)source.channels.size();
-    req.init_audio.sample_rate = source.sampleRate;
-    req.init_audio.init_noise_level = input.initNoiseLevel;
+    req.input_audio.samples = planar.data();
+    req.input_audio.n_samples = static_cast<uint64_t>(source.numSamples);
+    req.input_audio.n_channels = static_cast<uint32_t>(source.channels.size());
+    req.input_audio.sample_rate = static_cast<uint32_t>(source.sampleRate);
+    req.transform_noise_level = input.initNoiseLevel;
   }
   else if (input.mode == RenderMode::Continue)
   {
     const float sourceSeconds = source.numSamples > 0 ? (float)source.numSamples / std::max(1, source.sampleRate) : 0.f;
     const float totalSeconds = std::max((float)input.durationSeconds, sourceSeconds + 4.0f);
-    req.init_audio.mode = SA3_INIT_AUDIO_INPAINT;
-    req.init_audio.samples = planar.data();
-    req.init_audio.n_samp = source.numSamples;
-    req.init_audio.n_ch = (int)source.channels.size();
-    req.init_audio.sample_rate = source.sampleRate;
-    req.init_audio.inpaint_start = sourceSeconds;
-    req.init_audio.inpaint_end = totalSeconds;
+    req.duration_seconds = totalSeconds - sourceSeconds;
+    req.input_audio.samples = planar.data();
+    req.input_audio.n_samples = static_cast<uint64_t>(source.numSamples);
+    req.input_audio.n_channels = static_cast<uint32_t>(source.channels.size());
+    req.input_audio.sample_rate = static_cast<uint32_t>(source.sampleRate);
   }
 
   SetStatus(input.mode == RenderMode::Text ? "generating text audio"
             : input.mode == RenderMode::Transform ? "transforming source"
                                             : "continuing source");
-  sa3_audio audio = {};
-  const int rc = sa3->generateEx(mContext, &req, &audio, err, (int)sizeof err);
-  if (rc != 0)
+  sa3_result_v1 audio = {};
+  audio.size = sizeof(audio);
+  sa3->api->result_init(&audio);
+  const sa3_status_v1 status = sa3->api->generate(mContext, &req, &audio, &error);
+  if (status != SA3_STATUS_OK_V1)
   {
-    if (cancelled())
+    if (status == SA3_STATUS_CANCELLED_V1 || cancelled())
     {
       mCancelRequested.store(false, std::memory_order_release);
       finish("render cancelled", true);
     }
     else
     {
-      finish(std::string("sa3 failed: ") + err);
+      finish(std::string("sa3 failed: ") + error.message);
     }
     return;
   }
 
   if (cancelled())
   {
-    sa3->freeAudio(&audio);
+    sa3->api->result_free(&audio);
     mCancelRequested.store(false, std::memory_order_release);
     finish("render cancelled", true);
     return;
@@ -3170,10 +3193,9 @@ void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
 
   mLastSeed.store(RequestableSeed(audio.seed), std::memory_order_release);
   mHasLastSeed.store(true, std::memory_order_release);
-  // Loop mode: trim the padded generation back to the exact bar length (native rate is 44100).
-  const int keepSamples = (loopTargetSamples > 0) ? std::min(loopTargetSamples, audio.n_samp) : -1;
-  InstallOutputFromPlanar(audio.samples, audio.n_samp, audio.n_ch, audio.sample_rate, keepSamples);
-  sa3->freeAudio(&audio);
+  InstallOutputFromPlanar(audio.samples, static_cast<int>(audio.n_samples),
+                          static_cast<int>(audio.n_channels), static_cast<int>(audio.sample_rate));
+  sa3->api->result_free(&audio);
   SaveOutputToDisk();
   finish("render complete");
 }
@@ -3492,22 +3514,19 @@ void SA3IPlug2Demo::SetOutputStatus(const std::string& text)
   mOutputStatus = text;
 }
 
-void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate, int keepSamples)
+void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate)
 {
   if (!samples || nSamp <= 0 || nCh <= 0)
     return;
 
-  // keepSamples < 0 keeps everything; otherwise take the first keepSamples per channel (loop trim), reading
-  // with the source's full nSamp stride so the planar channel offsets stay correct.
-  const int outSamps = (keepSamples > 0 && keepSamples < nSamp) ? keepSamples : nSamp;
-  std::vector<std::vector<float>> next((size_t)nCh, std::vector<float>((size_t)outSamps, 0.f));
+  std::vector<std::vector<float>> next((size_t)nCh, std::vector<float>((size_t)nSamp, 0.f));
   for (int c = 0; c < nCh; ++c)
-    std::copy(samples + (size_t)c * nSamp, samples + (size_t)c * nSamp + outSamps, next[(size_t)c].begin());
+    std::copy(samples + (size_t)c * nSamp, samples + (size_t)c * nSamp + nSamp, next[(size_t)c].begin());
 
   {
     std::lock_guard<std::mutex> lock(mOutputMutex);
     mOutputBuffer = std::move(next);
-    mOutputSamples = outSamps;
+    mOutputSamples = nSamp;
     mOutputSampleRate = std::max(1, sampleRate);
     // resets playhead to 0 and stops playback: the swap ends the previous audition cleanly (user's preference).
     RebuildOutputPlaybackBufferFromNativeLocked(mHostSampleRate.load(std::memory_order_acquire));
@@ -3515,7 +3534,7 @@ void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int
   mOutputRevision.fetch_add(1, std::memory_order_acq_rel);
   char status[128] = {};
   std::snprintf(status, sizeof status, "output %.2fs @ %d Hz ready",
-                (double)outSamps / std::max(1, sampleRate), std::max(1, sampleRate));
+                (double)nSamp / std::max(1, sampleRate), std::max(1, sampleRate));
   SetOutputStatus(status);
 }
 

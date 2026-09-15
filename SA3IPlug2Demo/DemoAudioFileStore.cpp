@@ -1,4 +1,5 @@
 #include "DemoAudioFileStore.h"
+#include "libsa3_v1.h"
 
 #define DR_MP3_IMPLEMENTATION
 #include "vendor/dr_libs/dr_mp3.h"
@@ -478,7 +479,7 @@ std::vector<std::string> LoadPromptPoolForLoraSource(const std::string& sourcePa
   return prompts;
 }
 
-// Native in-process safetensors->gguf via libsa3's sa3_convert_lora (no Python). Loads sa3.dll from beside
+// Native in-process safetensors->gguf via libsa3's V1 table (no Python). Loads sa3.dll from beside
 // this module (same resolution the render path uses). Returns: 1 converted, 0 native unavailable (fall back
 // to Python), -1 native ran but the conversion failed (error set).
 int TryNativeConvertLora(const std::string& exportedBase, const std::string& destination, std::string& error)
@@ -502,9 +503,10 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
   if (!dll)
     return 0;
-  using ConvFn = int (*)(const char*, const char*, const char*, char*, int);
-  auto fn = reinterpret_cast<ConvFn>(GetProcAddress(dll, "sa3_convert_lora"));
-  if (!fn) { FreeLibrary(dll); return 0; }   // older sa3.dll without the function
+  using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
+  auto getApi = reinterpret_cast<GetApiFn>(GetProcAddress(dll, "sa3_get_api"));
+  const sa3_api_v1* api = getApi ? getApi(SA3_ABI_VERSION_1) : nullptr;
+  if (!api || api->size < SA3_API_V1_MIN_SIZE) { FreeLibrary(dll); return 0; }
 #elif defined(__APPLE__)
   Dl_info self = {};
   if (dladdr(reinterpret_cast<const void*>(&TryNativeConvertLora), &self) == 0 || !self.dli_fname)
@@ -514,24 +516,32 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   if (slash == std::string::npos) return 0;
   void* dll = dlopen((module.substr(0, slash) + "/libsa3.dylib").c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!dll) return 0;
-  using ConvFn = int (*)(const char*, const char*, const char*, char*, int);
-  auto fn = reinterpret_cast<ConvFn>(dlsym(dll, "sa3_convert_lora"));
-  if (!fn) { dlclose(dll); return 0; }
+  using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
+  auto getApi = reinterpret_cast<GetApiFn>(dlsym(dll, "sa3_get_api"));
+  const sa3_api_v1* api = getApi ? getApi(SA3_ABI_VERSION_1) : nullptr;
+  if (!api || api->size < SA3_API_V1_MIN_SIZE) { dlclose(dll); return 0; }
 #else
   return 0;
 #endif
 
   const std::string safet = exportedBase + ".safetensors";
   const std::string json  = exportedBase + ".json";
-  char err[512] = {};
-  const int rc = fn(safet.c_str(), FileExists(json) ? json.c_str() : nullptr,
-                    destination.c_str(), err, (int)sizeof err);
+  sa3_lora_convert_v1 options = {};
+  options.size = sizeof(options);
+  api->lora_convert_init(&options);
+  options.safetensors_path = safet.c_str();
+  options.json_path = FileExists(json) ? json.c_str() : nullptr;
+  options.output_gguf_path = destination.c_str();
+  sa3_error_v1 abiError = {};
+  abiError.size = sizeof(abiError);
+  api->error_init(&abiError);
+  const sa3_status_v1 status = api->convert_lora(&options, &abiError);
 #if defined(_WIN32)
   FreeLibrary(dll);
 #elif defined(__APPLE__)
   dlclose(dll);
 #endif
-  if (rc != 0) { error = std::string("libsa3 convert: ") + err; return -1; }
+  if (status != SA3_STATUS_OK_V1) { error = std::string("libsa3 convert: ") + abiError.message; return -1; }
   return 1;
 }
 
@@ -1167,6 +1177,12 @@ std::string DraggedAudioDirectory(std::string* error = nullptr)
   return draggedAudio;
 }
 
+std::vector<std::string> LoadPromptPoolForLora(const std::string& sourcePath,
+                                               const std::string& displayName)
+{
+  return LoadPromptPoolForLoraSource(sourcePath, displayName);
+}
+
 AudioFileInfo SaveRecordingWav(const RecordingSnapshot& snapshot)
 {
   AudioFileInfo info;
@@ -1228,6 +1244,34 @@ AudioFileInfo SaveOutputWav(const RecordingSnapshot& snapshot)
   if (!info.ok)
     info.error = "WAV write completed but output file is empty";
 
+  return info;
+}
+
+AudioFileInfo SaveWavFile(const std::string& path, const RecordingSnapshot& snapshot)
+{
+  AudioFileInfo info;
+  info.path = path;
+  info.numSamples = snapshot.numSamples;
+  info.sampleRate = snapshot.sampleRate;
+  info.numChannels = static_cast<int>(snapshot.channels.size());
+
+  if (path.empty())
+  {
+    info.error = "output path is empty";
+    return info;
+  }
+
+  std::string error;
+  if (!WritePcm16Wav(path, snapshot, error))
+  {
+    info.error = error;
+    return info;
+  }
+
+  info.bytes = FileSizeBytes(path);
+  info.ok = info.bytes > 0;
+  if (!info.ok)
+    info.error = "WAV write completed but output file is empty";
   return info;
 }
 
@@ -1861,6 +1905,80 @@ bool SaveSetting(const std::string& key, const std::string& value)
   for (const auto& e : entries)
     out << e.first << '=' << e.second << '\n';
   return static_cast<bool>(out);
+}
+
+std::vector<PersistedCreativeLora> LoadCreativeLoraRegistry(const std::string& variant)
+{
+  constexpr int kMaximumLoras = 64;
+  const bool smallModel = VariantIsSmall(variant);
+  const std::string registryPrefix = smallModel ? "creative_lora_small_music_" : "creative_lora_medium_";
+  std::string countText = LoadSetting(registryPrefix + "count");
+  std::string itemPrefix = registryPrefix;
+
+  // Before registries were model-specific, every saved creative LoRA targeted medium.
+  // Keep reading that list as medium until the user next edits it, at which point the
+  // explicit medium registry is written by SaveCreativeLoraRegistry().
+  if (!smallModel && countText.empty())
+  {
+    countText = LoadSetting("creative_lora_count");
+    itemPrefix = "creative_lora_";
+  }
+
+  int count = 0;
+  if (!countText.empty())
+  {
+    char* end = nullptr;
+    const long parsed = std::strtol(countText.c_str(), &end, 10);
+    if (end != countText.c_str() && (!end || *end == '\0'))
+      count = std::clamp(static_cast<int>(parsed), 0, kMaximumLoras);
+  }
+
+  std::vector<PersistedCreativeLora> loras;
+  loras.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i)
+  {
+    const std::string prefix = itemPrefix + std::to_string(i) + "_";
+    const std::string path = LoadSetting(prefix + "path");
+    if (path.empty())
+      continue;
+    PersistedCreativeLora lora;
+    lora.path = path;
+    const std::string strengthText = LoadSetting(prefix + "strength");
+    if (!strengthText.empty())
+    {
+      char* end = nullptr;
+      const float parsed = std::strtof(strengthText.c_str(), &end);
+      if (end != strengthText.c_str() && (!end || *end == '\0') && std::isfinite(parsed))
+        lora.strength = std::clamp(parsed, 0.f, 2.f);
+    }
+    const std::string enabledText = LoadSetting(prefix + "enabled");
+    if (enabledText == "0" || enabledText == "false" || enabledText == "off")
+      lora.enabled = false;
+    loras.push_back(std::move(lora));
+  }
+  return loras;
+}
+
+bool SaveCreativeLoraRegistry(const std::string& variant,
+                              const std::vector<PersistedCreativeLora>& loras)
+{
+  constexpr size_t kMaximumLoras = 64;
+  const std::string registryPrefix = VariantIsSmall(variant)
+    ? "creative_lora_small_music_" : "creative_lora_medium_";
+  const size_t count = std::min(loras.size(), kMaximumLoras);
+  bool saved = true;
+  for (size_t i = 0; i < count; ++i)
+  {
+    const std::string prefix = registryPrefix + std::to_string(i) + "_";
+    char strength[32] = {};
+    std::snprintf(strength, sizeof(strength), "%.3f", std::clamp(loras[i].strength, 0.f, 2.f));
+    saved = SaveSetting(prefix + "path", loras[i].path) && saved;
+    saved = SaveSetting(prefix + "strength", strength) && saved;
+    saved = SaveSetting(prefix + "enabled", loras[i].enabled ? "1" : "0") && saved;
+  }
+  // Count is written last so an interrupted update cannot expose partial entries.
+  saved = SaveSetting(registryPrefix + "count", std::to_string(count)) && saved;
+  return saved;
 }
 
 std::string DefaultModelsDirectory(std::string* error)

@@ -13,3 +13,4 @@ ipch/
 *.tmp
 *.wav
 !SA3IPlug2Demo/resources/**/*.wav
+releases/

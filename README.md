@@ -47,7 +47,7 @@ It reuses some UI concepts and audio-file handling from [gary4juce](https://gith
 
 Paths below use `<sa3.cpp>` for your sa3.cpp checkout (the `SA3_CPP_DIR` you configured — a sibling checkout by default).
 
-The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. Imported creative LoRAs, strengths, and enabled states are remembered for new plug-in instances; DAW project/preset state keeps its own selection along with the three prompts and generation controls. Missing saved files are skipped safely. `.gguf` files are copied directly. `.safetensors` imports are converted to gguf **in-process by `libsa3` (`sa3_convert_lora`) — no Python needed**; current exports can carry their metadata internally, while older exports can still use a matching `.json` sidecar. `.ckpt` imports use that same in-process conversion once an exported `.safetensors` file is found beside the checkpoint or in the parent LoRA folder.
+The UI can import `.gguf`, `.safetensors`, and `.ckpt` LoRAs into `Documents/sa3-iplug2-demo/loras`, enable/remove them, and pass strength sliders through `libsa3` as full-path LoRA entries. Imported creative LoRAs, strengths, and enabled states are remembered for new plug-in instances; DAW project/preset state keeps its own selection along with the three prompts and generation controls. Missing saved files are skipped safely. `.gguf` files are copied directly. `.safetensors` imports are converted to gguf **in-process through the versioned `libsa3` V1 table — no Python needed**; current exports can carry their metadata internally, while older exports can still use a matching `.json` sidecar. `.ckpt` imports use that same in-process conversion once an exported `.safetensors` file is found beside the checkpoint or in the parent LoRA folder.
 
 The settings screen has a dedicated [SAME-L decoder correction](https://huggingface.co/thepatch/same-l-decoder-lora) slot. `download 11 MB` fetches `squeakfix_v3.safetensors`, converts it locally, selects it at strength `1.0`, and persists the selection. `choose file` accepts a compatible local GGUF or safetensors export. This slot is deliberately separate from the main creative-LoRA list and is gated to the `medium`/SAME-L model family.
 
@@ -176,6 +176,34 @@ Set `SA3_MODELS_DIR` at runtime to override the fallback model directory. The in
 also download the `medium` or `small-music` GGUF file set into `Documents/sa3-iplug2-demo/models`, point at an
 existing folder, and persist that folder plus the selected variant.
 
+### REAPER extension
+
+The repository also builds a REAPER extension target. It registers Transform, Continue, and Generate actions,
+adds Transform and Continue to the media-item context menu, and opens a dockable panel that follows the selected item,
+destination track, time selection, tempo, and time signature.
+
+Generate, Transform, and Continue are connected end-to-end through the embedded `libsa3` runtime. Generate replaces a
+time selection on the chosen destination track. Transform captures one selected audio item (optionally narrowed by a
+time selection) and replaces that range. Continue captures the same source range, appends the selected number of
+seconds, and uses sa3.cpp's source splice for a clean transition. Each result is written to a unique WAV under
+`Documents/sa3-iplug2-demo/reaper_audio`, and each timeline edit is one REAPER undo step. Model variant, creative LoRAs,
+the SAME-L decoder LoRA, and loudness processing are shared with the VST3. Prompt, distribution shift, continuation
+length, seed lock, and last generated seed are stored in the REAPER project.
+
+Build and install it for the current Windows user with:
+
+```powershell
+cmake --build build --config Release --target SA3ReaperExtension
+$reaperPlugins = Join-Path $env:APPDATA 'REAPER\UserPlugins'
+New-Item -ItemType Directory -Force $reaperPlugins | Out-Null
+Copy-Item .\build\out\reaper_SA3ReaperExtension.dll $reaperPlugins -Force
+Copy-Item .\build\out\SA3ReaperExtension $reaperPlugins -Recurse -Force
+```
+
+Restart REAPER after copying the DLL. The commands appear under `Extensions > SA3` and in the Actions list;
+Transform and Continue also appear in the media-item right-click menu. `SA3: Dock/undock panel` switches between
+a floating window and the REAPER docker.
+
 ## builds & releases
 
 the backend is decided by which `sa3.cpp` build you point the plugin at (`SA3_BUILD_DIR`) — the plugin just bundles
@@ -203,13 +231,13 @@ If the demo feels CPU-bound, confirm that `SA3_BUILD_DIR` points at the CUDA-ena
 
 The render request uses the same embedded `libsa3` path for all modes. Text generation, transform, and continue all request outer SAME-L chunked decode (`128` with `32` overlap). Transform and continue also request chunked encode for their source audio. SAME-L sliding-window attention is handled inside `libsa3` from the model metadata, not by a separate plugin UI control.
 
-The demo runs renders in frugal/early-free mode (`keep_models = 0`) so long text2music generations can release T5 before sampling, release DiT before decode, and fully release the autoencoder path after decode. The run button becomes a cancel button during active generation, and plugin teardown asks `libsa3` to cancel cooperatively before joining the worker thread.
+Both iPlug hosts default to frugal/early-free mode so long text2music generations can release T5 before sampling, release DiT before decode, and fully release the autoencoder path after decode. Their Settings screens can opt into keeping models resident between renders for faster repeat work, with the additional GPU-memory cost stated beside the toggle. The run button becomes a cancel button during active generation, and plugin teardown asks `libsa3` to cancel cooperatively before joining the worker thread.
 
 ## DAW scanning notes
 
 On Windows, `SA3IPlug2Demo.vst3` is a bundle directory. It is normal for it to appear as a folder in a file browser; hosts load it from their plug-in browser after scanning.
 
-The VST3/app binaries load `sa3.dll` / `libsa3.dylib` at render time from beside the binary instead of importing it at module load. This keeps strict host scanners from rejecting the plug-in before the bundled `sa3.dll`, `ggml*.dll`, CUDA runtime DLLs, or macOS `libggml*.dylib` files can be found.
+The VST3/app binaries load `sa3.dll` / `libsa3.dylib` at render time from beside the binary instead of importing it at module load. They resolve only `sa3_get_api` and require the complete C ABI V1 table. This keeps strict host scanners from rejecting the plug-in before the bundled `sa3.dll`, `ggml*.dll`, CUDA runtime DLLs, or macOS `libggml*.dylib` files can be found.
 
 For Ableton testing without admin rights, either scan the repo's `build\out` as a VST3 custom folder or copy the bundle to `%LOCALAPPDATA%\Programs\Common\VST3`. Do not point Ableton's VST2 custom folder at the repo/build root, because it will try to scan every helper DLL as a VST2 plug-in.
 
@@ -223,7 +251,7 @@ Copy-Item -LiteralPath .\build\out\SA3IPlug2Demo.vst3 -Destination $userVst3 -Re
 The current validated metadata is:
 
 - vendor: `the collabage patch`
-- version: `0.3.0`
+- version: `0.4.0`
 - VST3 validator: `47 tests passed, 0 tests failed`
 
 ## Playback crackle triage
