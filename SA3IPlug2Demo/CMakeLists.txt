@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SA3IPlug2Demo VERSION 0.4.0)
+project(SA3IPlug2Demo VERSION 0.4.1)
 
 set(SA3_DEMO_PLATFORM_LIBS)
 if(WIN32)
@@ -37,6 +37,13 @@ function(sa3_demo_copy_runtime target_name)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SA3_RUNTIME_LIBS} "$<TARGET_FILE_DIR:${target_name}>"
       COMMENT "Copying sa3/ggml runtime libraries for ${target_name}"
     )
+    if(APPLE)
+      add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -DBUNDLE_DIR=$<TARGET_FILE_DIR:${target_name}>
+                -P "${CMAKE_SOURCE_DIR}/cmake/FixMacRpath.cmake"
+        COMMENT "Fixing bundled sa3/ggml library paths for ${target_name}"
+      )
+    endif()
   endif()
 endfunction()
 

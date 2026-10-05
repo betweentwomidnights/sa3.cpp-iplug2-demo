@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SA3ReaperExtension VERSION 0.4.0)
+project(SA3ReaperExtension VERSION 0.4.1)
 
 if(NOT WIN32 AND NOT APPLE)
   message(STATUS "SA3ReaperExtension is only supported on Windows and macOS. Skipping.")
@@ -59,5 +59,12 @@ if(SA3_RUNTIME_LIBS)
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/SA3ReaperExtension"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SA3_RUNTIME_LIBS} "$<TARGET_FILE_DIR:${PROJECT_NAME}>/SA3ReaperExtension"
     COMMENT "Copying sa3/ggml runtime libraries for ${PROJECT_NAME}"
+  )
+endif()
+if(APPLE AND SA3_RUNTIME_LIBS)
+  add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DBUNDLE_DIR=$<TARGET_FILE_DIR:${PROJECT_NAME}>/SA3ReaperExtension
+            -P "${CMAKE_SOURCE_DIR}/cmake/FixMacRpath.cmake"
+    COMMENT "Fixing bundled sa3/ggml library paths for the REAPER extension"
   )
 endif()

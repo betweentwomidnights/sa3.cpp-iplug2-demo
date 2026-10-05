@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SA3IPlug2DemoRepo VERSION 0.4.0 LANGUAGES C CXX)
+project(SA3IPlug2DemoRepo VERSION 0.4.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -59,6 +59,8 @@ if(APPLE)
     "${SA3_BUILD_DIR}/ggml/src/lib*ggml*.dylib"
     "${SA3_BUILD_DIR}/ggml/src/ggml-*/*.dylib"
   )
+  # Bundle only the install-name sonames, avoiding three copies of each ggml dylib.
+  list(FILTER SA3_RUNTIME_DYLIBS INCLUDE REGEX "/(libsa3\\.dylib|lib[A-Za-z0-9_-]*ggml[a-z-]*\\.[0-9]+\\.dylib)$")
 endif()
 # Only bundle the CUDA runtime when the selected sa3 build actually uses the CUDA backend
 # (a Vulkan / Metal / CPU build ships no cudart/cublas). Detected by the presence of ggml-cuda.dll,
