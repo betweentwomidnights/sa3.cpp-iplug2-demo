@@ -138,6 +138,22 @@ The default CMake cache expects:
 
 `IPLUG2_DIR` defaults to the bundled `vendor/iPlug2` submodule; override it only if you want a different iPlug2 checkout.
 
+For a build you will ship, configure `sa3.cpp` by hand with `-DSA3_PRIVATE_GGML=ON` (and `-DGGML_NATIVE=OFF`
+for portable CPU code), then configure this demo with `-DSA3_REQUIRE_PRIVATE_GGML=ON`:
+
+```cmd
+cd C:\dev\sa3.cpp
+cmake -S . -B build-vulkan -G "Visual Studio 17 2022" -A x64 -DSA3_VULKAN=ON -DGGML_NATIVE=OFF -DSA3_PRIVATE_GGML=ON
+cmake --build build-vulkan --config Release
+```
+
+`SA3_PRIVATE_GGML` names ggml's libraries after the backend and ggml commit (`sa3-vulkan-ca7bcb6f-ggml.dll`,
+`sa3-vulkan-ca7bcb6f-ggml-base.dll`, ...). A DAW loads every plugin into one process, and Windows binds an
+import of `ggml.dll` to any `ggml.dll` already loaded there, so with plain names an older release of this
+demo or another vendor's ggml-based plugin could hand it a different ggml. With the private names it only
+shares ggml with a build of the same code. `SA3_REQUIRE_PRIVATE_GGML=ON` stops the configure if the
+`sa3.cpp` build still uses plain names; without it, the configure only warns.
+
 ### 3. Configure and build this demo
 
 Run from the demo repo root:
