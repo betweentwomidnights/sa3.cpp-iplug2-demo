@@ -61,3 +61,10 @@ if(SA3_RUNTIME_LIBS)
     COMMENT "Copying sa3/ggml runtime libraries for ${PROJECT_NAME}"
   )
 endif()
+if(APPLE AND SA3_RUNTIME_LIBS)
+  add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DBUNDLE_DIR=$<TARGET_FILE_DIR:${PROJECT_NAME}>/SA3ReaperExtension
+            -P "${CMAKE_SOURCE_DIR}/cmake/FixMacRpath.cmake"
+    COMMENT "Fixing bundled sa3/ggml library paths for the REAPER extension"
+  )
+endif()
