@@ -2,7 +2,7 @@
 
 #define PLUG_NAME "SA3IPlug2Demo"
 #define PLUG_MFR "the collabage patch"
-#define PLUG_VERSION_HEX 0x00040001
+#define PLUG_VERSION_HEX 0x00000401
 #define PLUG_VERSION_STR "0.4.1"
 #define PLUG_UNIQUE_ID 'S3id'
 #define PLUG_MFR_ID 'Tcpa'
