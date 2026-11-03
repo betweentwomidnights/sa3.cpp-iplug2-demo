@@ -64,6 +64,22 @@ constexpr const char* kLoraFolderName = "loras";
 
 std::string ExtensionLower(const std::string& path);
 
+#if defined(_WIN32)
+std::string WideToUtf8(const wchar_t* text);
+
+std::wstring Utf8ToWide(const std::string& text)
+{
+  if (text.empty())
+    return {};
+  const int required = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+  if (required <= 0)
+    return {};
+  std::wstring result(static_cast<size_t>(required), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), &result[0], required);
+  return result;
+}
+#endif
+
 std::string JoinPath(const std::string& left, const char* right)
 {
   if (left.empty())
@@ -214,7 +230,7 @@ bool DirectoryExists(const std::string& path)
   if (path.empty())
     return false;
 #if defined(_WIN32)
-  const DWORD attributes = GetFileAttributesA(path.c_str());
+  const DWORD attributes = GetFileAttributesW(Utf8ToWide(path).c_str());
   return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 #else
   struct stat st = {};
@@ -248,7 +264,7 @@ void AddUniquePrompt(std::vector<std::string>& prompts, std::string prompt)
 
 std::string ReadWholeTextFile(const std::string& path)
 {
-  std::ifstream in(path, std::ios::binary);
+  std::ifstream in(PathFromUtf8(path), std::ios::binary);
   if (!in)
     return {};
   return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
@@ -316,8 +332,8 @@ void AppendTxtPromptsFromDirectory(const std::string& directory, std::vector<std
 
 #if defined(_WIN32)
   const std::string pattern = JoinPath(directory, "*.txt");
-  WIN32_FIND_DATAA findData = {};
-  HANDLE find = FindFirstFileA(pattern.c_str(), &findData);
+  WIN32_FIND_DATAW findData = {};
+  HANDLE find = FindFirstFileW(Utf8ToWide(pattern).c_str(), &findData);
   if (find == INVALID_HANDLE_VALUE)
     return;
 
@@ -325,8 +341,8 @@ void AppendTxtPromptsFromDirectory(const std::string& directory, std::vector<std
   {
     if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
       continue;
-    AddUniquePrompt(prompts, ReadWholeTextFile(JoinPath(directory, findData.cFileName)));
-  } while (FindNextFileA(find, &findData));
+    AddUniquePrompt(prompts, ReadWholeTextFile(JoinPath(directory, WideToUtf8(findData.cFileName).c_str())));
+  } while (FindNextFileW(find, &findData));
 
   FindClose(find);
 #endif
@@ -380,22 +396,22 @@ std::string PythonExecutable()
 bool RunProcessAndWait(const std::string& commandLine, const std::string& workDir, std::string& error)
 {
 #if defined(_WIN32)
-  STARTUPINFOA startup = {};
+  STARTUPINFOW startup = {};
   startup.cb = sizeof(startup);
   startup.dwFlags = STARTF_USESHOWWINDOW;
   startup.wShowWindow = SW_HIDE;
   PROCESS_INFORMATION process = {};
-  std::vector<char> mutableCommand(commandLine.begin(), commandLine.end());
-  mutableCommand.push_back('\0');
+  std::wstring mutableCommand = Utf8ToWide(commandLine);
+  const std::wstring workDirWide = Utf8ToWide(workDir);
 
-  const BOOL ok = CreateProcessA(nullptr,
+  const BOOL ok = CreateProcessW(nullptr,
                                  mutableCommand.data(),
                                  nullptr,
                                  nullptr,
                                  FALSE,
                                  CREATE_NO_WINDOW,
                                  nullptr,
-                                 workDir.empty() ? nullptr : workDir.c_str(),
+                                 workDir.empty() ? nullptr : workDirWide.c_str(),
                                  &startup,
                                  &process);
   if (!ok)
@@ -637,7 +653,8 @@ std::string UserDocumentsPath(std::string* error)
   if (widePath != nullptr)
     CoTaskMemFree(widePath);
 
-  if (const char* userProfile = std::getenv("USERPROFILE"))
+  const std::string userProfile = EnvironmentPath("USERPROFILE");
+  if (!userProfile.empty())
     return JoinPath(userProfile, "Documents");
 
   if (error != nullptr)
@@ -663,7 +680,7 @@ bool EnsureDirectoryExists(const std::string& path, std::string* error)
   }
 
 #if defined(_WIN32)
-  if (CreateDirectoryA(path.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS)
+  if (CreateDirectoryW(Utf8ToWide(path).c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS)
     return true;
 
   if (error != nullptr)
@@ -796,9 +813,9 @@ bool WritePcm16Wav(const std::string& path, const RecordingSnapshot& snapshot, s
     return false;
   }
 
-  std::remove(path.c_str());
+  RemoveFile(path);
 
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  std::ofstream out(PathFromUtf8(path), std::ios::binary | std::ios::trunc);
   if (!out)
   {
     error = "could not open WAV for writing";
@@ -980,10 +997,12 @@ AudioFileInfo LoadMp3File(const std::string& path, RecordingSnapshot& snapshot)
   info.path = path;
   info.bytes = FileSizeBytes(path);
 
+  // From memory, because dr_mp3 opens files by narrow path.
+  const std::string encoded = ReadWholeTextFile(path);
   drmp3_config config = {};
   drmp3_uint64 totalFrames = 0;
   std::unique_ptr<float, decltype(&FreeDrMp3Float)> interleaved(
-    drmp3_open_file_and_read_pcm_frames_f32(path.c_str(), &config, &totalFrames, nullptr),
+    drmp3_open_memory_and_read_pcm_frames_f32(encoded.data(), encoded.size(), &config, &totalFrames, nullptr),
     FreeDrMp3Float);
 
   if (!interleaved)
@@ -1044,14 +1063,14 @@ bool CopyFileBytes(const std::string& sourcePath, const std::string& destination
     return false;
   }
 
-  std::ifstream in(sourcePath, std::ios::binary);
+  std::ifstream in(PathFromUtf8(sourcePath), std::ios::binary);
   if (!in)
   {
     error = "could not open source file";
     return false;
   }
 
-  std::ofstream out(destinationPath, std::ios::binary | std::ios::trunc);
+  std::ofstream out(PathFromUtf8(destinationPath), std::ios::binary | std::ios::trunc);
   if (!out)
   {
     error = "could not create destination file";
@@ -1112,7 +1131,7 @@ bool PrepareOutputUndoSnapshot(std::string& error)
 
   if (FileSizeBytes(outputPath) < 1)
   {
-    std::remove(undoPath.c_str());
+    RemoveFile(undoPath);
     return true;
   }
 
@@ -1174,9 +1193,9 @@ std::string LoraDirectory(std::string* error)
 
 std::string Sa3CppDirectory()
 {
-  if (const char* path = std::getenv("SA3_CPP_DIR"))
-    if (*path)
-      return path;
+  const std::string path = EnvironmentPath("SA3_CPP_DIR");
+  if (!path.empty())
+    return path;
   return SA3_DEMO_SA3_CPP_DIR;
 }
 
@@ -1316,9 +1335,9 @@ AudioFileInfo SaveOutputBase64Audio(const std::string& base64Audio)
     return info;
   }
 
-  std::remove(info.path.c_str());
+  RemoveFile(info.path);
 
-  std::ofstream out(info.path, std::ios::binary | std::ios::trunc);
+  std::ofstream out(PathFromUtf8(info.path), std::ios::binary | std::ios::trunc);
   if (!out)
   {
     info.error = "could not open output audio for writing";
@@ -1479,7 +1498,7 @@ AudioFileInfo RestoreOutputUndo()
     return info;
   }
 
-  std::remove(undoPath.c_str());
+  RemoveFile(undoPath);
 
   info.bytes = FileSizeBytes(info.path);
   info.ok = info.bytes > 0;
@@ -1563,7 +1582,7 @@ AudioFileInfo LoadWavFile(const std::string& path, RecordingSnapshot& snapshot)
   info.path = path;
   info.bytes = FileSizeBytes(path);
 
-  std::ifstream in(path, std::ios::binary);
+  std::ifstream in(PathFromUtf8(path), std::ios::binary);
   if (!in)
   {
     info.error = "could not open WAV file";
@@ -1753,7 +1772,7 @@ bool ReadFileBase64(const std::string& path, std::string& base64, std::string& e
   base64.clear();
   error.clear();
 
-  std::ifstream in(path, std::ios::binary);
+  std::ifstream in(PathFromUtf8(path), std::ios::binary);
   if (!in)
   {
     error = "could not open file for base64 encoding";
@@ -1773,12 +1792,47 @@ bool ReadFileBase64(const std::string& path, std::string& base64, std::string& e
 
 uint64_t FileSizeBytes(const std::string& path)
 {
-  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  std::ifstream in(PathFromUtf8(path), std::ios::binary | std::ios::ate);
   if (!in)
     return 0;
 
   const std::streamoff size = in.tellg();
   return size > 0 ? static_cast<uint64_t>(size) : 0;
+}
+
+std::filesystem::path PathFromUtf8(const std::string& path)
+{
+#if defined(_WIN32)
+  return std::filesystem::path(Utf8ToWide(path));
+#else
+  return std::filesystem::path(path);
+#endif
+}
+
+std::string PathToUtf8(const std::filesystem::path& path)
+{
+#if defined(_WIN32)
+  return WideToUtf8(path.c_str());
+#else
+  return path.string();
+#endif
+}
+
+void RemoveFile(const std::string& path)
+{
+  std::error_code ec;
+  std::filesystem::remove(PathFromUtf8(path), ec);
+}
+
+std::string EnvironmentPath(const char* name)
+{
+#if defined(_WIN32)
+  const wchar_t* value = _wgetenv(Utf8ToWide(name).c_str());
+  return value != nullptr ? WideToUtf8(value) : std::string();
+#else
+  const char* value = std::getenv(name);
+  return value != nullptr ? std::string(value) : std::string();
+#endif
 }
 
 // =====================================================================================================
@@ -1804,15 +1858,16 @@ std::mutex& SettingsMutex()
 std::string GlobOneInDir(const std::string& dir, const std::string& prefix, const std::string& suffix)
 {
   std::error_code ec;
-  if (!fs::is_directory(dir, ec))
+  const fs::path root = PathFromUtf8(dir);
+  if (!fs::is_directory(root, ec))
     return {};
-  for (const auto& entry : fs::directory_iterator(dir, ec))
+  for (const auto& entry : fs::directory_iterator(root, ec))
   {
-    const std::string n = entry.path().filename().string();
+    const std::string n = PathToUtf8(entry.path().filename());
     if (n.size() >= prefix.size() + suffix.size()
         && n.compare(0, prefix.size(), prefix) == 0
         && n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0)
-      return entry.path().string();
+      return PathToUtf8(entry.path());
   }
   return {};
 }
@@ -1861,7 +1916,7 @@ std::string LoadSetting(const std::string& key)
   const std::string path = SettingsPath();
   if (path.empty())
     return {};
-  std::ifstream in(path);
+  std::ifstream in(PathFromUtf8(path));
   if (!in)
     return {};
   std::string line;
@@ -1891,7 +1946,7 @@ bool SaveSetting(const std::string& key, const std::string& value)
   std::vector<std::pair<std::string, std::string>> entries;
   bool replaced = false;
   {
-    std::ifstream in(path);
+    std::ifstream in(PathFromUtf8(path));
     std::string line;
     while (std::getline(in, line))
     {
@@ -1915,7 +1970,7 @@ bool SaveSetting(const std::string& key, const std::string& value)
   if (!replaced)
     entries.emplace_back(key, value);
 
-  std::ofstream out(path, std::ios::trunc);
+  std::ofstream out(PathFromUtf8(path), std::ios::trunc);
   if (!out)
     return false;
   for (const auto& e : entries)
@@ -2069,14 +2124,13 @@ AsyncProcess StartProcess(const std::vector<std::string>& argv, std::string& err
       cmdLine.push_back(' ');
     cmdLine += QuoteWinArg(argv[i]);
   }
-  STARTUPINFOA startup = {};
+  STARTUPINFOW startup = {};
   startup.cb = sizeof(startup);
   startup.dwFlags = STARTF_USESHOWWINDOW;
   startup.wShowWindow = SW_HIDE;
   PROCESS_INFORMATION info = {};
-  std::vector<char> mutableCmd(cmdLine.begin(), cmdLine.end());
-  mutableCmd.push_back('\0');
-  const BOOL ok = CreateProcessA(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
+  std::wstring mutableCmd = Utf8ToWide(cmdLine);
+  const BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
                                  CREATE_NO_WINDOW, nullptr, nullptr, &startup, &info);
   if (!ok)
   {
@@ -2168,7 +2222,7 @@ long long HttpContentLength(const std::string& url)
   std::error_code ec;
   const fs::path tmp = fs::temp_directory_path(ec)
                      / ("sa3dl_head_" + std::to_string(std::hash<std::string>{}(url)) + ".txt");
-  const std::string tmpPath = tmp.string();
+  const std::string tmpPath = PathToUtf8(tmp);
 
   std::string error;
   AsyncProcess proc = StartProcess({"curl", "-sIL", "-o", tmpPath, url}, error);
@@ -2180,13 +2234,13 @@ long long HttpContentLength(const std::string& url)
   ProcessClose(proc);
   if (code != 0)
   {
-    std::remove(tmpPath.c_str());
+    RemoveFile(tmpPath);
     return -1;
   }
 
   long long contentLength = -1;
   {
-    std::ifstream in(tmpPath, std::ios::binary);
+    std::ifstream in(PathFromUtf8(tmpPath), std::ios::binary);
     std::string line;
     while (std::getline(in, line))
     {
@@ -2209,7 +2263,7 @@ long long HttpContentLength(const std::string& url)
       }
     }
   }
-  std::remove(tmpPath.c_str());
+  RemoveFile(tmpPath);
   return contentLength;
 }
 

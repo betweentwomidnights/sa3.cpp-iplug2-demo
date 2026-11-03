@@ -300,7 +300,7 @@ std::string CompactText(const std::string& text, size_t maxChars)
 
 std::string FileNameOnly(const std::string& path)
 {
-  return path.empty() ? std::string() : std::filesystem::path(path).filename().string();
+  return path.empty() ? std::string() : gary::PathToUtf8(gary::PathFromUtf8(path).filename());
 }
 
 std::string HumanBytes(uint64_t bytes)
@@ -1560,7 +1560,6 @@ void SA3ReaperExtension::StartOrCancelDecoderLoraDownload()
 
 void SA3ReaperExtension::DecoderLoraDownloadWorkerMain()
 {
-  namespace fs = std::filesystem;
   auto finish = [this]() {
     mDecoderDownloadBusy.store(false, std::memory_order_release);
     mDecoderDownloadRevision.fetch_add(1, std::memory_order_acq_rel);
@@ -1578,12 +1577,12 @@ void SA3ReaperExtension::DecoderLoraDownloadWorkerMain()
   constexpr const char* kRepository = "thepatch/same-l-decoder-lora";
   constexpr const char* kFileName = "squeakfix_v3.safetensors";
   const std::string url = gary::HuggingFaceResolveUrl(kRepository, kFileName);
-  const std::string destination = (fs::path(directory) / kFileName).string();
+  const std::string destination = gary::PathToUtf8(gary::PathFromUtf8(directory) / kFileName);
   const long long expected = gary::HttpContentLength(url);
   long long local = static_cast<long long>(gary::FileSizeBytes(destination));
   if (expected > 0 && local > expected)
   {
-    std::remove(destination.c_str());
+    gary::RemoveFile(destination);
     local = 0;
   }
 
@@ -1633,7 +1632,7 @@ void SA3ReaperExtension::DecoderLoraDownloadWorkerMain()
 
   if (expected > 0 && static_cast<long long>(gary::FileSizeBytes(destination)) != expected)
   {
-    std::remove(destination.c_str());
+    gary::RemoveFile(destination);
     SetDecoderDownloadStatus("decoder download was incomplete; retry");
     finish();
     return;
@@ -1745,7 +1744,7 @@ void SA3ReaperExtension::ReloadCreativeLoras()
   {
     CreativeLora lora;
     lora.path = saved.path;
-    lora.name = std::filesystem::path(saved.path).stem().string();
+    lora.name = gary::PathToUtf8(gary::PathFromUtf8(saved.path).stem());
     if (lora.name.empty())
       lora.name = FileNameOnly(saved.path);
     if (gary::FileSizeBytes(saved.path) == 0)
@@ -1802,7 +1801,7 @@ void SA3ReaperExtension::AddCreativeLora()
 
   CreativeLora lora;
   lora.path = imported.path;
-  lora.name = imported.name.empty() ? std::filesystem::path(imported.path).stem().string() : imported.name;
+  lora.name = imported.name.empty() ? gary::PathToUtf8(gary::PathFromUtf8(imported.path).stem()) : imported.name;
   lora.strength = 0.f;
   mCreativeLoras.push_back(std::move(lora));
   PersistCreativeLoras();
@@ -2028,7 +2027,7 @@ bool SA3ReaperExtension::LoadProjectStateLine(const char* line)
       return true;
     if (std::strcmp(promptText, "-") != 0 && !HexDecode(promptText, lane.prompt))
       return true;
-    lane.name = std::filesystem::path(lane.path).stem().string();
+    lane.name = gary::PathToUtf8(gary::PathFromUtf8(lane.path).stem());
     mLanes.push_back(std::move(lane));
     refreshLanes();
     return true;
@@ -2562,7 +2561,7 @@ std::string SA3ReaperExtension::MakeUniqueOutputPath(Operation operation, std::s
     return {};
 
   std::error_code ec;
-  const std::filesystem::path directory = std::filesystem::path(documents) / "reaper_audio";
+  const std::filesystem::path directory = gary::PathFromUtf8(documents) / "reaper_audio";
   std::filesystem::create_directories(directory, ec);
   if (ec)
   {
@@ -2580,7 +2579,7 @@ std::string SA3ReaperExtension::MakeUniqueOutputPath(Operation operation, std::s
     const std::string name = stem + (suffix == 0 ? "" : "-" + std::to_string(suffix)) + ".wav";
     const std::filesystem::path candidate = directory / name;
     if (!std::filesystem::exists(candidate, ec))
-      return candidate.string();
+      return gary::PathToUtf8(candidate);
   }
   error = "could not allocate a unique generated-audio filename";
   return {};

@@ -14,7 +14,6 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <commdlg.h>
 #endif
 
 #include <algorithm>
@@ -1835,9 +1834,8 @@ std::string SA3IPlug2Demo::ModelsDir() const
     if (!mModelsDirSetting.empty())
       return mModelsDirSetting;
   }
-  if (const char* e = std::getenv("SA3_MODELS_DIR"))
-    if (*e) return e;
-  return SA3_DEMO_DEFAULT_MODELS_DIR;
+  const std::string fromEnvironment = gary::EnvironmentPath("SA3_MODELS_DIR");
+  return !fromEnvironment.empty() ? fromEnvironment : std::string(SA3_DEMO_DEFAULT_MODELS_DIR);
 }
 
 std::string SA3IPlug2Demo::ModelVariant() const
@@ -2325,9 +2323,7 @@ void SA3IPlug2Demo::PersistCreativeLoras()
   mCreativeLorasDirty.store(!saved, std::memory_order_release);
 }
 
-#ifndef _WIN32
-// Empty when cancelled. Windows keeps its ANSI dialogs: the file store opens narrow paths, which there
-// means the system code page rather than the UTF-8 PromptForFile returns.
+// The native open dialog, returning UTF-8. Empty when cancelled.
 static std::string ChooseFile(IGraphics* ui, const char* extensions)
 {
   if (!ui)
@@ -2337,28 +2333,12 @@ static std::string ChooseFile(IGraphics* ui, const char* extensions)
   ui->PromptForFile(fileName, directory, EFileAction::Open, extensions);
   return fileName.Get();
 }
-#endif
 
 bool SA3IPlug2Demo::ImportLoraFromDialog()
 {
-#ifdef _WIN32
-  char fileName[MAX_PATH] = {};
-  OPENFILENAMEA ofn = {};
-  ofn.lStructSize = sizeof(ofn);
-  ofn.hwndOwner = nullptr;
-  ofn.lpstrFilter = "SA3 LoRA (*.gguf;*.safetensors;*.ckpt)\0*.gguf;*.safetensors;*.ckpt\0GGUF LoRA (*.gguf)\0*.gguf\0Exported LoRA (*.safetensors)\0*.safetensors\0Checkpoint LoRA (*.ckpt)\0*.ckpt\0All files\0*.*\0";
-  ofn.lpstrFile = fileName;
-  ofn.nMaxFile = MAX_PATH;
-  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-  ofn.lpstrTitle = "Import SA3 LoRA";
-
-  if (!GetOpenFileNameA(&ofn))
-    return false;
-#else
   const std::string fileName = ChooseFile(GetUI(), "gguf safetensors ckpt");
   if (fileName.empty())
     return false;
-#endif
 
   const auto info = gary::ImportLoraFile(fileName);
   if (!info.ok)
@@ -2614,7 +2594,7 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
       if (!readString(lane.path) || !readString(lane.prompt) || !readValue(pointCount)
           || pointCount > static_cast<uint32_t>(gary::kSA3MaxLanePoints))
         return -1;
-      lane.name = std::filesystem::path(lane.path).stem().string();
+      lane.name = gary::PathToUtf8(gary::PathFromUtf8(lane.path).stem());
       for (uint32_t p = 0; p < pointCount; ++p)
       {
         float position = 0.f;
@@ -2753,21 +2733,9 @@ void SA3IPlug2Demo::ClearDecoderLoraSelection()
 
 bool SA3IPlug2Demo::ImportDecoderLoraFromDialog()
 {
-#ifdef _WIN32
-  char fileName[MAX_PATH] = {};
-  OPENFILENAMEA ofn = {};
-  ofn.lStructSize = sizeof(ofn);
-  ofn.lpstrFilter = "SA3 decoder LoRA (*.gguf;*.safetensors)\0*.gguf;*.safetensors\0All files\0*.*\0";
-  ofn.lpstrFile = fileName;
-  ofn.nMaxFile = MAX_PATH;
-  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-  ofn.lpstrTitle = "Choose SAME-L decoder correction LoRA";
-  if (!GetOpenFileNameA(&ofn)) return false;
-#else
   const std::string fileName = ChooseFile(GetUI(), "gguf safetensors");
   if (fileName.empty())
     return false;
-#endif
   const auto info = gary::ImportLoraFile(fileName);
   if (!info.ok) { SetStatus("decoder LoRA import failed: " + info.error); return false; }
   {
@@ -3185,7 +3153,6 @@ void SA3IPlug2Demo::StopDownloadWorker()
 
 void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
 {
-  namespace fs = std::filesystem;
   const std::string variant = (variantIdx == 1) ? "small-music" : "medium";
   auto finish = [this]() {
     mDownloadProgress.store(0.0f, std::memory_order_release);
@@ -3215,7 +3182,7 @@ void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
   {
     if (mDownloadCancel.load(std::memory_order_acquire)) { SetStatus("download cancelled"); finish(); return; }
 
-    const std::string dest = (fs::path(destDir) / plan[i].filename).string();
+    const std::string dest = gary::PathToUtf8(gary::PathFromUtf8(destDir) / plan[i].filename);
     const std::string url = gary::HuggingFaceResolveUrl(plan[i].repo, plan[i].filename);
     const long long expected = sizes[i];
     long long localSize = (long long)gary::FileSizeBytes(dest);
@@ -3229,7 +3196,7 @@ void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
     }
     if (expected > 0 && localSize > expected)     // corrupt/oversized — restart this file fresh
     {
-      std::remove(dest.c_str());
+      gary::RemoveFile(dest);
       localSize = 0;
     }
 
@@ -3289,7 +3256,7 @@ void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
     // hand libsa3 a corrupt gguf. Delete it so the retry starts clean instead of resuming garbage.
     if (expected > 0 && (long long)gary::FileSizeBytes(dest) != expected)
     {
-      std::remove(dest.c_str());
+      gary::RemoveFile(dest);
       SetStatus("download of " + std::string(plan[i].what) + " was incomplete — click models to retry");
       finish();
       return;
@@ -3332,7 +3299,6 @@ void SA3IPlug2Demo::StartDecoderLoraDownload()
 
 void SA3IPlug2Demo::DecoderLoraDownloadWorkerMain()
 {
-  namespace fs = std::filesystem;
   auto finish = [this]() {
     mDownloadProgress.store(0.0f, std::memory_order_release);
     mDownloading.store(false, std::memory_order_release);
@@ -3346,11 +3312,11 @@ void SA3IPlug2Demo::DecoderLoraDownloadWorkerMain()
   constexpr const char* kRepo = "thepatch/same-l-decoder-lora";
   constexpr const char* kFile = "squeakfix_v3.safetensors";
   const std::string url = gary::HuggingFaceResolveUrl(kRepo, kFile);
-  const std::string dest = (fs::path(dir) / kFile).string();
+  const std::string dest = gary::PathToUtf8(gary::PathFromUtf8(dir) / kFile);
   SetStatus("checking SAME-L decoder correction");
   const long long expected = gary::HttpContentLength(url);
   long long local = (long long)gary::FileSizeBytes(dest);
-  if (expected > 0 && local > expected) { std::remove(dest.c_str()); local = 0; }
+  if (expected > 0 && local > expected) { gary::RemoveFile(dest); local = 0; }
 
   if (!(expected > 0 && local == expected))
   {
@@ -3383,7 +3349,7 @@ void SA3IPlug2Demo::DecoderLoraDownloadWorkerMain()
 
   if (expected > 0 && (long long)gary::FileSizeBytes(dest) != expected)
   {
-    std::remove(dest.c_str());
+    gary::RemoveFile(dest);
     SetStatus("decoder download was incomplete - retry");
     finish();
     return;

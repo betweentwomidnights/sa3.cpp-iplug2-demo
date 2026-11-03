@@ -261,12 +261,11 @@ SA3RenderRequest LoadSharedRenderRequest(std::string prompt,
   request.bpm = bpm;
 
   const std::string savedModelsDir = LoadSetting("models_dir");
+  const std::string envModels = EnvironmentPath("SA3_MODELS_DIR");
   if (!savedModelsDir.empty())
     request.modelsDir = savedModelsDir;
-  else if (const char* envModels = std::getenv("SA3_MODELS_DIR"))
-    request.modelsDir = *envModels ? envModels : SA3_DEMO_DEFAULT_MODELS_DIR;
   else
-    request.modelsDir = SA3_DEMO_DEFAULT_MODELS_DIR;
+    request.modelsDir = !envModels.empty() ? envModels : SA3_DEMO_DEFAULT_MODELS_DIR;
 
   const std::string savedVariant = LoadSetting("variant");
   request.variant = (savedVariant == "small-music" || savedVariant == "small-sfx") ? "small-music" : "medium";
