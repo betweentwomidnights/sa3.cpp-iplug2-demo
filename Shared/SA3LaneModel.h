@@ -35,6 +35,35 @@ enum class SA3LaneBlend
   Distinct
 };
 
+// What dragged points land on. The values are saved with projects and sessions.
+enum class SA3LaneSnap
+{
+  Off = 0,
+  Quarter = 1,
+  Half = 2,
+  Bar = 3
+};
+
+inline SA3LaneSnap LaneSnapFromIndex(int index)
+{
+  return index >= 1 && index <= 3 ? static_cast<SA3LaneSnap>(index) : SA3LaneSnap::Off;
+}
+
+inline double LaneSnapSeconds(SA3LaneSnap snap, double bpm, double beatsPerBar)
+{
+  if (bpm <= 0.0)
+    return 0.0;
+  const double beat = 60.0 / bpm;
+  switch (snap)
+  {
+    case SA3LaneSnap::Quarter: return beat;
+    case SA3LaneSnap::Half: return beat * 2.0;
+    case SA3LaneSnap::Bar: return beat * std::max(1.0, beatsPerBar);
+    case SA3LaneSnap::Off: break;
+  }
+  return 0.0;
+}
+
 struct SA3LaneBlendSettings
 {
   float isolation = 1.f;

@@ -121,6 +121,8 @@ private:
   void SyncLanesToCreativeLoras();
   std::vector<gary::SA3LaneSource> LaneSources() const;
   double LaneTimelineSeconds() const;
+  double LaneTimelineStart() const;
+  void UpdateLanePlayhead();
   void SetLaneBackdrop(const gary::RecordingSnapshot& audio, double startSeconds);
   int LaneIndexFor(const std::string& path) const;
   bool LaneMissing(const std::string& path) const;
@@ -194,6 +196,7 @@ private:
 
   std::vector<gary::SA3Lane> mLanes;
   gary::SA3LaneBlend mLaneBlend = gary::SA3LaneBlend::OneSong;
+  gary::SA3LaneSnap mLaneSnap = gary::SA3LaneSnap::Off;
   bool mLastRenderUsedLanes = false;
 
   bool mSettingsOpen = false;

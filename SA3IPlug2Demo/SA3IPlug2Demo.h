@@ -147,8 +147,6 @@ public:
     mBpm.store(std::clamp(mBpm.load(std::memory_order_acquire) + delta, 20.0, 300.0), std::memory_order_release);
   }
   void ClearBpmOverride() { mBpmOverride.store(false, std::memory_order_release); }   // resume following host
-  bool AppendBpm() const noexcept { return mAppendBpm.load(std::memory_order_acquire); }
-  void ToggleAppendBpm() { mAppendBpm.store(!AppendBpm(), std::memory_order_release); }
   int KeyRoot() const noexcept { return mKeyRoot.load(std::memory_order_acquire); }   // 0=none, 1..12=C..B
   int KeyMode() const noexcept { return mKeyMode.load(std::memory_order_acquire); }   // 0=major, 1=minor
   void SetKeyRoot(int root) { mKeyRoot.store(std::clamp(root, 0, 12), std::memory_order_release); }
@@ -212,6 +210,7 @@ public:
   void ToggleOutputPlayback();
   void StopOutputPlayback();
   void SeekOutputPlayback(double seconds);
+  double OutputPlayheadSeconds() const;   // negative when nothing has been played from the output
 
   Waveform SourceWaveform(int bucketCount) const;
   Waveform OutputWaveform(int bucketCount) const;
@@ -274,7 +273,6 @@ private:
   std::atomic<double> mBpm{120.0};
   std::atomic<int> mBeatsPerBar{4};
   std::atomic<bool> mBpmOverride{false};
-  std::atomic<bool> mAppendBpm{true};
   std::atomic<int> mKeyRoot{0};
   std::atomic<int> mKeyMode{0};
   std::atomic<int> mLoopBars{0};
@@ -315,6 +313,7 @@ private:
   // Lanes are only touched on the UI thread, where hosts also save and restore state.
   std::vector<gary::SA3Lane> mLanes;
   gary::SA3LaneBlend mLaneBlend = gary::SA3LaneBlend::OneSong;
+  gary::SA3LaneSnap mLaneSnap = gary::SA3LaneSnap::Off;
   std::vector<float> mLaneBackdrop;
   bool mAutomationOn = false;
   bool mLastRenderUsedLanes = false;

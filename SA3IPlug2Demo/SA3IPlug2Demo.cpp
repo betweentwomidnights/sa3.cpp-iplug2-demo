@@ -42,7 +42,7 @@ constexpr int kCtrlTagMain = 1000;
 constexpr int kCtrlTagLanes = 1001;
 constexpr int kCtrlTagPanel = 1002;
 constexpr uint32_t kPluginStateMagic = 0x53334133u; // "SA3" state chunk
-constexpr uint32_t kPluginStateVersion = 2u;   // 2 added the ending choices and automation lanes
+constexpr uint32_t kPluginStateVersion = 3u;   // 2 added the ending choices and automation lanes, 3 lane snap
 constexpr int kMaxPersistedLoras = 64;
 
 std::string CompactText(std::string text, size_t maxChars)
@@ -158,7 +158,6 @@ class SA3DemoControl final : public IControl
     NoiseSlider,
     SeedToggle,
     SeedField,
-    BpmToggle,
     BpmValue,
     KeyRoot,
     KeyMode,
@@ -172,6 +171,7 @@ class SA3DemoControl final : public IControl
     Automation,
     LoraRemove,
     LoraSlider,
+    LoraScroll,
     OutputPlay,
     OutputStop,
     SaveBuffer
@@ -185,6 +185,7 @@ class SA3DemoControl final : public IControl
     Cfg,
     Noise,
     Lora,
+    LoraScroll,
     Bpm,
     PeakDb,
     LimiterCeiling,
@@ -291,7 +292,9 @@ public:
     y += 56.f;
 
     y = DrawModeControls(g, IRECT(left, y, right, y + 104.f), mode) + 8.f;
-    const float loraPanelHeight = mPlugin.Loras().empty() ? 76.f : 108.f;
+    const size_t loraCount = mPlugin.Loras().size();
+    const float loraPanelHeight = loraCount == 0 ? 76.f
+      : 44.f + kLoraRowPitch * static_cast<float>(std::clamp(loraCount, size_t(2), kLoraRowsShown));
     y = DrawLoraPanel(g, IRECT(left, y, right, y + loraPanelHeight)) + 8.f;
 
     mRunRect = IRECT(left, y, left + 180.f, y + 32.f);
@@ -332,13 +335,7 @@ public:
         {
           mEditTarget = EditTarget::Prompt;
           mEditPromptMode = mode;
-          const IText promptEntryText = IText(14.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle)
-                                          .WithTEColors(gary::ui::PanelDark(), COLOR_WHITE);
-          GetUI()->CreateTextEntry(*this,
-                                   promptEntryText,
-                                   mPromptRect,
-                                   mPlugin.PromptForMode(mode).c_str(),
-                                   0);
+          gary::ui::OpenPromptEntry(*this, mPromptRect, mPlugin.PromptForMode(mode).c_str(), 13.f);
         }
         return;
       }
@@ -380,7 +377,6 @@ public:
           GetUI()->CreateTextEntry(*this, seedEntryText, mSeedFieldRect, seedText.c_str(), 0);
         }
         return;
-      case Hit::BpmToggle:      mPlugin.ToggleAppendBpm(); SetDirty(false); return;
       case Hit::BpmValue:       mActiveSlider = Slider::Bpm; return;   // vertical drag adjusts (see OnMouseDrag)
       case Hit::KeyRoot:        OpenKeyRootMenu(); return;
       case Hit::KeyMode:        OpenKeyModeMenu(); return;
@@ -401,11 +397,12 @@ public:
         mPlugin.SetEndingKeepsGoing(mPlugin.CurrentRenderMode(), hit.hit == Hit::KeepsGoing);
         SetDirty(false);
         return;
-      case Hit::LoraSlider:     mActiveSlider = Slider::Lora; mActiveLoraIndex = hit.index; UpdateSliderFromX(x); return;
+      case Hit::LoraSlider:     mActiveSlider = Slider::Lora; mActiveLoraRow = hit.index; UpdateSliderFromX(x); return;
+      case Hit::LoraScroll:     mActiveSlider = Slider::LoraScroll; ScrollLorasTo(y); return;
       case Hit::PeakDbSlider: mActiveSlider = Slider::PeakDb; UpdateSliderFromX(x); return;
       case Hit::LimiterCeilingSlider: mActiveSlider = Slider::LimiterCeiling; UpdateSliderFromX(x); return;
       case Hit::LimiterKneeSlider: mActiveSlider = Slider::LimiterKnee; UpdateSliderFromX(x); return;
-      case Hit::LoraRemove:     mPlugin.RemoveLora(hit.index); SetDirty(false); return;
+      case Hit::LoraRemove:     mPlugin.RemoveLora(mFirstLora + hit.index); SetDirty(false); return;
       case Hit::AddLora:        mPlugin.ImportLoraFromDialog(); SetDirty(false); return;
       case Hit::Automation:     mPlugin.ToggleAutomation(); SetDirty(false); return;
       case Hit::Run:
@@ -435,6 +432,11 @@ public:
     {
       mPlugin.AdjustBpm((double)(-dY) * 0.4);   // drag up = faster; ~2.5px per bpm, deliberate not twitchy
       SetDirty(false);
+      return;
+    }
+    if (mActiveSlider == Slider::LoraScroll)
+    {
+      ScrollLorasTo(y);
       return;
     }
     if (mActiveSlider != Slider::None)
@@ -507,6 +509,18 @@ public:
     IControl::OnMouseOut();
   }
 
+  void OnMouseWheel(float x, float y, const IMouseMod&, float d) override
+  {
+    if (mSettingsOpen || !mLoraListRect.Contains(x, y))
+      return;
+    const size_t total = mPlugin.Loras().size();
+    if (d < 0.f && mFirstLora + kLoraRowsShown < total)
+      ++mFirstLora;
+    else if (d > 0.f && mFirstLora > 0)
+      --mFirstLora;
+    SetDirty(false);
+  }
+
   void OnDrop(const char* str) override
   {
     mPlugin.LoadDroppedAudioFile(str);
@@ -574,6 +588,9 @@ public:
   }
 
 private:
+  static constexpr float kLoraRowPitch = 26.f;
+  static constexpr size_t kLoraRowsShown = 5;
+
   static const char* ActionLabel(SA3IPlug2Demo::RenderMode mode)
   {
     switch (mode)
@@ -618,7 +635,6 @@ private:
     if (mNoiseSliderRect.Contains(x, y)) return {Hit::NoiseSlider, 0};
     if (mSeedToggleRect.Contains(x, y)) return {Hit::SeedToggle, 0};
     if (mSeedFieldRect.Contains(x, y)) return {Hit::SeedField, 0};
-    if (mBpmToggleRect.Contains(x, y)) return {Hit::BpmToggle, 0};
     if (mBpmValueRect.Contains(x, y)) return {Hit::BpmValue, 0};
     if (mKeyRootRect.Contains(x, y)) return {Hit::KeyRoot, 0};
     if (mKeyModeRect.Contains(x, y)) return {Hit::KeyMode, 0};
@@ -628,6 +644,7 @@ private:
       if (mBarsRects[i].Contains(x, y)) return {Hit::LoopBars, i};
     if (mEndsHereRect.Contains(x, y)) return {Hit::EndsHere, 0};
     if (mKeepsGoingRect.Contains(x, y)) return {Hit::KeepsGoing, 0};
+    if (mLoraScrollRect.Contains(x, y)) return {Hit::LoraScroll, 0};
     for (size_t i = 0; i < mLoraSliderRects.size(); ++i)
       if (mLoraSliderRects[i].Contains(x, y)) return {Hit::LoraSlider, i};
     for (size_t i = 0; i < mLoraRemoveRects.size(); ++i)
@@ -706,8 +723,8 @@ private:
     const std::string prompt = mPlugin.PromptForMode(mode);
     const bool empty = prompt.empty();
     const std::string shown = empty ? std::string("type a prompt ...or don't. that's cool too") : prompt;
-    g.DrawText(IText(13.f, empty ? TextDim() : COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(shown, FitChars(mPromptRect.W() - 16.f, 6.0f, 14, 160)).c_str(), mPromptRect.GetPadded(-8.f));
+    const IText promptText(13.f, empty ? TextDim() : COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle);
+    g.DrawText(promptText, FitText(g, promptText, shown, mPromptRect.W() - 16.f).c_str(), mPromptRect.GetPadded(-8.f));
   }
 
   float SliderFraction(float value, float minValue, float maxValue) const
@@ -857,7 +874,6 @@ private:
     mNoiseSliderRect = {};
     mSeedToggleRect = {};
     mSeedFieldRect = {};
-    mBpmToggleRect = {};
     mBpmValueRect = {};
     mKeyRootRect = {};
     mKeyModeRect = {};
@@ -956,21 +972,16 @@ private:
   void DrawMusicalControls(IGraphics& g, const IRECT& bounds)
   {
     using namespace gary::ui;
-    // bpm-append toggle + live host tempo
+    // live host tempo
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
                "bpm", IRECT(bounds.L, bounds.T, bounds.L + 30.f, bounds.B));
-    mBpmToggleRect = IRECT(bounds.L + 34.f, bounds.MH() - 8.f, bounds.L + 50.f, bounds.MH() + 8.f);
-    const bool bpmOn = mPlugin.AppendBpm();
-    g.DrawRoundRect(bpmOn ? Red() : Frame(), mBpmToggleRect, 2.f);
-    if (bpmOn)
-      g.FillRoundRect(Red(), mBpmToggleRect.GetPadded(-4.f), 1.f);
     // draggable bpm value (vertical drag adjusts; follows host tempo until dragged)
-    mBpmValueRect = IRECT(mBpmToggleRect.R + 6.f, bounds.T + 2.f, bounds.L + 116.f, bounds.B - 2.f);
+    mBpmValueRect = IRECT(bounds.L + 34.f, bounds.T + 2.f, bounds.L + 94.f, bounds.B - 2.f);
     g.FillRoundRect(ButtonFill(), mBpmValueRect, 3.f);
     g.DrawRoundRect(mPlugin.BpmOverridden() ? Frame() : FrameSoft(), mBpmValueRect, 3.f);
     char bpmText[24] = {};
     std::snprintf(bpmText, sizeof bpmText, "%d", (int)std::llround(mPlugin.Bpm()));
-    g.DrawText(IText(12.f, bpmOn ? COLOR_WHITE : TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle),
+    g.DrawText(IText(12.f, COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle),
                bpmText, mBpmValueRect);
 
     // key root (dropdown) + major/minor (click toggle)
@@ -1065,6 +1076,8 @@ private:
     mAutomationRect = {};
     mLoraRemoveRects.clear();
     mLoraSliderRects.clear();
+    mLoraListRect = {};
+    mLoraScrollRect = {};
 
     const std::vector<SA3IPlug2Demo::LoraSlot> loras = mPlugin.Loras();
     g.FillRoundRect(PanelDark(), bounds, 4.f);
@@ -1088,11 +1101,23 @@ private:
       return bounds.B;
     }
 
-    const size_t rowCount = std::min<size_t>(loras.size(), 2);
+    const size_t total = loras.size();
+    const size_t rowCount = std::min(total, kLoraRowsShown);
+    if (mSeenLoraCount > 0 && total > mSeenLoraCount)   // show the one just added
+      mFirstLora = total - rowCount;
+    mSeenLoraCount = total;
+    mFirstLora = std::min(mFirstLora, total - rowCount);
+    const float rowsHeight = kLoraRowPitch * static_cast<float>(rowCount);
+    mLoraListRect = IRECT(bounds.L, y, bounds.R, y + rowsHeight);
+    const bool scrolls = total > rowCount;
+    if (scrolls)
+      mLoraScrollRect = IRECT(bounds.R - 9.f, y, bounds.R - 4.f, y + rowsHeight - 4.f);
+    const float rowRight = scrolls ? right - 5.f : right;
+
     for (size_t i = 0; i < rowCount; ++i)
     {
-      const auto& lora = loras[i];
-      IRECT row(left, y, right, y + 22.f);
+      const auto& lora = loras[mFirstLora + i];
+      IRECT row(left, y, rowRight, y + 22.f);
       IRECT remove(row.R - 24.f, row.T, row.R, row.B);
       IRECT slider(row.R - 154.f, row.T + 3.f, row.R - 34.f, row.B - 3.f);
       IRECT label(row.L, row.T, slider.L - 8.f, row.B);
@@ -1126,14 +1151,17 @@ private:
         g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle), value, IRECT(slider.L, row.B - 2.f, slider.R, row.B + 12.f));
       }
       DrawButton(g, remove, "x", kDemoFont);
-      y += 26.f;
+      y += kLoraRowPitch;
     }
-
-    if (loras.size() > rowCount)
-      g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
-                 "+ more loras queued", IRECT(left, y, right, y + 14.f));
+    DrawScrollbar(g, mLoraScrollRect, mFirstLora, rowCount, total);
 
     return bounds.B;
+  }
+
+  void ScrollLorasTo(float y)
+  {
+    mFirstLora = gary::ui::ScrollbarFirstAt(mLoraScrollRect, y, kLoraRowsShown, mPlugin.Loras().size());
+    SetDirty(false);
   }
 
   void UpdateSliderFromX(float x)
@@ -1157,8 +1185,8 @@ private:
         mPlugin.SetInitNoiseLevel(0.01f + fraction(mNoiseSliderRect, x) * 0.99f);
         break;
       case Slider::Lora:
-        if (mActiveLoraIndex < mLoraSliderRects.size())
-          mPlugin.SetLoraStrength(mActiveLoraIndex, fraction(mLoraSliderRects[mActiveLoraIndex], x) * 2.f);
+        if (mActiveLoraRow < mLoraSliderRects.size())
+          mPlugin.SetLoraStrength(mFirstLora + mActiveLoraRow, fraction(mLoraSliderRects[mActiveLoraRow], x) * 2.f);
         break;
       case Slider::PeakDb:
         mPlugin.SetPeakNormalizeDb(-6.f + fraction(mPeakDbSliderRect, x) * 12.f);
@@ -1170,6 +1198,7 @@ private:
         mPlugin.SetLimiterKnee(0.1f + fraction(mLimiterKneeSliderRect, x) * 0.9f);
         break;
       case Slider::Bpm:   // handled by vertical drag in OnMouseDrag
+      case Slider::LoraScroll:
       case Slider::None:
         break;
     }
@@ -1387,7 +1416,7 @@ private:
   IRECT mGenerateTabRect, mTransformTabRect, mContinueTabRect;
   IRECT mDurationSliderRect, mStepsSliderRect, mCfgSliderRect, mNoiseSliderRect;
   IRECT mSeedToggleRect, mSeedFieldRect;
-  IRECT mBpmToggleRect, mBpmValueRect, mKeyRootRect, mKeyModeRect;
+  IRECT mBpmValueRect, mKeyRootRect, mKeyModeRect;
   IRECT mDistShiftRect;
   IRECT mLoopToggleRect;
   std::array<IRECT, 4> mBarsRects{};   // 4, 8, 16 (index 3 unused)
@@ -1395,6 +1424,9 @@ private:
   IRECT mRunRect, mAddLoraRect, mAutomationRect;
   std::vector<IRECT> mLoraRemoveRects;
   std::vector<IRECT> mLoraSliderRects;
+  IRECT mLoraListRect, mLoraScrollRect;
+  size_t mFirstLora = 0;
+  size_t mSeenLoraCount = 0;
   IRECT mSaveBufferRect;
   IRECT mOutputWaveformRect, mOutputPlayRect, mOutputStopRect;
   Slider mActiveSlider = Slider::None;
@@ -1405,7 +1437,7 @@ private:
   std::vector<int> mModelsActions;
   EditTarget mEditTarget = EditTarget::None;
   SA3IPlug2Demo::RenderMode mEditPromptMode = SA3IPlug2Demo::RenderMode::Text;
-  size_t mActiveLoraIndex = 0;
+  size_t mActiveLoraRow = 0;
   bool mOutputPointerDown = false;
   bool mOutputDragStarted = false;
   float mOutputDragStartX = 0.f;
@@ -1503,7 +1535,10 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
         if (IControl* control = ui->GetControlWithTag(kCtrlTagMain))
           control->SetDirty(false);
     };
-    auto* editor = new gary::ui::SA3LaneEditorControl(IRECT(), mLanes, mLaneBlend, std::move(laneHost));
+#if defined(APP_API)
+    laneHost.canSnap = false;
+#endif
+    auto* editor = new gary::ui::SA3LaneEditorControl(IRECT(), mLanes, mLaneBlend, mLaneSnap, std::move(laneHost));
     editor->SetBackdrop(mLaneBackdrop);
     pGraphics->AttachControl(editor, kCtrlTagLanes);
     ApplyWindowLayout(pGraphics);
@@ -1615,8 +1650,13 @@ void SA3IPlug2Demo::OnIdle()
     ApplyWindowLayout(ui);
   if (mAutomationOn)
     if (auto* control = ui->GetControlWithTag(kCtrlTagLanes))
-      control->As<gary::ui::SA3LaneEditorControl>()->SetTimeline(RenderSeconds(CurrentRenderMode()), Bpm(),
-                                                                 mBeatsPerBar.load(std::memory_order_acquire));
+    {
+      auto* editor = control->As<gary::ui::SA3LaneEditorControl>();
+      editor->SetTimeline(RenderSeconds(CurrentRenderMode()), Bpm(), mBeatsPerBar.load(std::memory_order_acquire));
+      // The curves start where the last render did, which in Continue is after the source it plays first.
+      const double playhead = OutputPlayheadSeconds();
+      editor->SetPlayhead(playhead < 0.0 ? -1.0 : playhead - mLaneTimelineStart);
+    }
   if (auto* control = ui->GetControlWithTag(kCtrlTagMain))
     control->SetDirty(false);
 }
@@ -2078,7 +2118,7 @@ gary::SA3RenderRequest SA3IPlug2Demo::BuildRenderRequest(RenderMode mode)
 
   // Build the prompt actually sent: base + optional " <bpm> bpm" + optional " C minor".
   // Mirrors gary4juce SA3UI (host tempo + key/scale get appended to the text prompt).
-  const double promptBpm = AppendBpm() || loop ? Bpm() : 0.0;
+  const double promptBpm = Bpm();
   const std::string keyScale = KeyScaleText();
   request.bpm = Bpm();
   request.prompt = gary::PromptWithKeyScale(gary::PromptWithTempo(PromptForMode(mode), promptBpm), keyScale);
@@ -2396,7 +2436,7 @@ bool SA3IPlug2Demo::SerializeState(IByteChunk& chunk) const
   const uint8_t hasLastSeed = mHasLastSeed.load(std::memory_order_acquire) ? 1u : 0u;
   const double bpm = mBpm.load(std::memory_order_acquire);
   const uint8_t bpmOverride = mBpmOverride.load(std::memory_order_acquire) ? 1u : 0u;
-  const uint8_t appendBpm = mAppendBpm.load(std::memory_order_acquire) ? 1u : 0u;
+  const uint8_t appendBpm = 1u;   // kept so saved sessions keep their layout; the tempo is always sent
   const int32_t keyRoot = mKeyRoot.load(std::memory_order_acquire);
   const int32_t keyMode = mKeyMode.load(std::memory_order_acquire);
   const int32_t loopBars = mLoopBars.load(std::memory_order_acquire);
@@ -2435,9 +2475,11 @@ bool SA3IPlug2Demo::SerializeState(IByteChunk& chunk) const
 
   const uint8_t automationOn = mAutomationOn ? 1u : 0u;
   const uint8_t laneBlend = mLaneBlend == gary::SA3LaneBlend::Distinct ? 1u : 0u;
+  const uint8_t laneSnap = static_cast<uint8_t>(mLaneSnap);
   const uint32_t laneCount = static_cast<uint32_t>(std::min(mLanes.size(), gary::kSA3MaxLanes));
   chunk.Put(&automationOn);
   chunk.Put(&laneBlend);
+  chunk.Put(&laneSnap);
   chunk.Put(&laneCount);
   for (uint32_t i = 0; i < laneCount; ++i)
   {
@@ -2542,11 +2584,12 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
 
   uint8_t automationOn = 0;
   uint8_t laneBlend = 0;
+  uint8_t laneSnap = 0;
   std::vector<gary::SA3Lane> restoredLanes;
   if (version >= 2u)
   {
     uint32_t laneCount = 0;
-    if (!readValue(automationOn) || !readValue(laneBlend) || !readValue(laneCount)
+    if (!readValue(automationOn) || !readValue(laneBlend) || (version >= 3u && !readValue(laneSnap)) || !readValue(laneCount)
         || laneCount > static_cast<uint32_t>(gary::kSA3MaxLanes))
       return -1;
     for (uint32_t i = 0; i < laneCount; ++i)
@@ -2605,7 +2648,6 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
   mHasLastSeed.store(hasLastSeed != 0, std::memory_order_release);
   mBpm.store(std::clamp(std::isfinite(bpm) ? bpm : 120.0, 20.0, 300.0), std::memory_order_release);
   mBpmOverride.store(bpmOverride != 0, std::memory_order_release);
-  mAppendBpm.store(appendBpm != 0, std::memory_order_release);
   mKeyRoot.store(std::clamp<int32_t>(keyRoot, 0, 12), std::memory_order_release);
   mKeyMode.store(keyMode ? 1 : 0, std::memory_order_release);
   mLoopBars.store((loopBars == 4 || loopBars == 8 || loopBars == 16) ? loopBars : 0, std::memory_order_release);
@@ -2618,6 +2660,7 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
   }
   mLanes = std::move(restoredLanes);
   mLaneBlend = laneBlend ? gary::SA3LaneBlend::Distinct : gary::SA3LaneBlend::OneSong;
+  mLaneSnap = gary::LaneSnapFromIndex(laneSnap);
   mAutomationOn = automationOn != 0;
   if (mAutomationOn)
     SyncLanesToLoras();
@@ -2852,6 +2895,16 @@ SA3IPlug2Demo::Waveform SA3IPlug2Demo::SourceWaveform(int bucketCount) const
     wf.peaks[(size_t)x].maxValue = std::clamp(mx, -1.f, 1.f);
   }
   return wf;
+}
+
+double SA3IPlug2Demo::OutputPlayheadSeconds() const
+{
+  const int playhead = mOutputPlayhead.load(std::memory_order_acquire);
+  const int rate = mOutputPlaybackSampleRate.load(std::memory_order_acquire);
+  // Paused keeps its place; stopped and never played are both back at the start and not playing.
+  if (rate <= 0 || (playhead <= 0 && !mOutputPlaying.load(std::memory_order_acquire)))
+    return -1.0;
+  return static_cast<double>(playhead) / rate;
 }
 
 SA3IPlug2Demo::Waveform SA3IPlug2Demo::OutputWaveform(int bucketCount) const

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IControl.h"
+#include "ITextEntryControl.h"
 #include "SA3LaneModel.h"
 #include "SA3UITheme.h"
 
@@ -15,10 +16,24 @@
 namespace gary::ui
 {
 
+// Opens text for editing as an overlay on the control: it wraps, and grows to show all of it.
+inline void OpenPromptEntry(IControl& control, const IRECT& bounds, const char* text, float textSize, int valIdx = 0)
+{
+  IGraphics* ui = control.GetUI();
+  if (!ui)
+    return;
+  if (auto* entry = ui->GetTextEntryControl())
+    entry->SetNextEditWraps(3, Frame());
+  ui->CreateTextEntry(control,
+    IText(textSize, COLOR_WHITE, FontName, EAlign::Near, EVAlign::Top).WithTEColors(PanelDark(), COLOR_WHITE),
+    bounds, text, valIdx);
+}
+
 // Stacked per-LoRA curves over a shared time axis, where a curve's height is the LoRA's strength.
 // Redraws only itself, so dragging a point stays responsive however heavy the rest of the host's UI
 // is. Below kWideWidth each lane's controls sit above its curve instead of beside it, so the same
-// control fits a narrow plugin window. The host owns the lanes and decides when one opens.
+// control fits a narrow plugin window, and squeeze onto one line once that would crowd the curves.
+// The host owns the lanes and decides when one opens.
 class SA3LaneEditorControl final : public IControl
 {
 public:
@@ -29,12 +44,14 @@ public:
     std::function<float(const SA3Lane&)> resetStrength;      // where the reset button flattens a curve
     std::function<void(const std::string&)> notify;
     std::function<void()> changed;
+    bool canSnap = true;                                     // follows a host's tempo, so not in a standalone
   };
 
-  SA3LaneEditorControl(const IRECT& bounds, std::vector<SA3Lane>& lanes, SA3LaneBlend& blend, Host host)
+  SA3LaneEditorControl(const IRECT& bounds, std::vector<SA3Lane>& lanes, SA3LaneBlend& blend, SA3LaneSnap& snap, Host host)
   : IControl(bounds)
   , mLanes(lanes)
   , mBlend(blend)
+  , mSnap(snap)
   , mHost(std::move(host))
   {
     SetTextEntryLength(1024);
@@ -55,6 +72,17 @@ public:
     mSeconds = seconds;
     mBpm = bpm;
     mBeatsPerBar = beatsPerBar;
+    SetDirty(false);
+  }
+
+  // Where playback is, in seconds from the start of the curves. Anything outside them hides the cursor.
+  void SetPlayhead(double seconds)
+  {
+    const float position = mSeconds > 0.0 && seconds >= 0.0 && seconds <= mSeconds
+                         ? static_cast<float>(seconds / mSeconds) : -1.f;
+    if (position == mPlayhead)
+      return;
+    mPlayhead = position;
     SetDirty(false);
   }
 
@@ -101,6 +129,8 @@ public:
     }
     for (size_t i = 0; i < mRows.size(); ++i)
       DrawLane(g, mRows[i], mLanes[mFirstLane + i], static_cast<int>(mFirstLane + i));
+    DrawScrollbar(g, mScrollTrack, mFirstLane, mRows.size(), mLanes.size());
+    DrawPlayhead(g);
     DrawReadout(g);
   }
 
@@ -120,6 +150,17 @@ public:
         mBlend = blend;
         Changed();
       }
+      return;
+    }
+    if (mSnapRect.Contains(x, y))
+    {
+      OpenSnapMenu();
+      return;
+    }
+    if (mScrollTrack.Contains(x, y))
+    {
+      mDrag = Drag::Scroll;
+      ScrollTo(y);
       return;
     }
 
@@ -148,9 +189,9 @@ public:
       }
       if (row.prompt.Contains(x, y))
       {
-        GetUI()->CreateTextEntry(*this,
-          IText(11.f, COLOR_WHITE, FontName, EAlign::Near, EVAlign::Middle).WithTEColors(PanelDark(), COLOR_WHITE),
-          row.prompt, lane.prompt.c_str(), static_cast<int>(index));
+        // Wider than the box, which can be narrow, and over whatever is beside it until the edit ends.
+        OpenPromptEntry(*this, IRECT(row.head.L, row.prompt.T, row.canvas.R, row.prompt.B), lane.prompt.c_str(), 12.f,
+                        static_cast<int>(index));
         return;
       }
       if (row.canvas.Contains(x, y))
@@ -182,6 +223,11 @@ public:
 
   void OnMouseDrag(float x, float y, float, float, const IMouseMod& mod) override
   {
+    if (mDrag == Drag::Scroll)
+    {
+      ScrollTo(y);
+      return;
+    }
     if (mDrag == Drag::None || mDragLane < 0 || mDragLane >= static_cast<int>(mLanes.size()))
       return;
     Layout();
@@ -193,7 +239,7 @@ public:
 
     float position = PositionAt(row.canvas, x);
     float amount = AmountAt(row.canvas, y);
-    Snap(position, amount, mod);
+    Snap(position, amount, mod, mDrag == Drag::Stroke);
     mHoverLane = mDragLane;
     mHoverX = x;
     mHoverY = y;
@@ -224,18 +270,21 @@ public:
   {
     if (mDrag == Drag::None)
       return;
+    const bool edited = mDrag != Drag::Scroll;
     mDrag = Drag::None;
     mStroke.clear();
-    Changed();
+    if (edited)
+      Changed();
   }
 
-  void OnMouseOver(float x, float y, const IMouseMod&) override
+  void OnMouseOver(float x, float y, const IMouseMod& mod) override
   {
     Layout();
     int lane = -1;
     int point = -1;
     bool overCanvas = false;
-    bool overControl = mBlendOneRect.Contains(x, y) || mBlendDistinctRect.Contains(x, y);
+    bool overControl = mBlendOneRect.Contains(x, y) || mBlendDistinctRect.Contains(x, y) || mSnapRect.Contains(x, y)
+                    || mScrollTrack.Contains(x, y);
     for (size_t i = 0; i < mRows.size(); ++i)
     {
       const Row& row = mRows[i];
@@ -249,6 +298,8 @@ public:
                                       : PositionAt(row.canvas, x);
         mReadoutAmount = point >= 0 ? mLanes[static_cast<size_t>(lane)].points[static_cast<size_t>(point)].amount
                                     : AmountAt(row.canvas, y);
+        if (point < 0)   // says where a click would land
+          Snap(mReadoutPosition, mReadoutAmount, mod, mod.S);
       }
     }
     SetCursor(point >= 0 || overControl ? ECursor::HAND : overCanvas ? ECursor::CROSS : ECursor::ARROW);
@@ -285,6 +336,14 @@ public:
     SetDirty(false);
   }
 
+  void OnPopupMenuSelection(IPopupMenu* menu, int) override
+  {
+    if (!menu || menu->GetChosenItemIdx() < 0)
+      return;
+    mSnap = LaneSnapFromIndex(menu->GetChosenItemIdx());
+    Changed();
+  }
+
   void OnTextEntryCompletion(const char* str, int valIdx) override
   {
     if (valIdx < 0 || valIdx >= static_cast<int>(mLanes.size()) || !str)
@@ -302,7 +361,8 @@ private:
   {
     None,
     Point,
-    Stroke
+    Stroke,
+    Scroll
   };
 
   struct Row
@@ -323,7 +383,8 @@ private:
     mTitleRect = IRECT(bar.L, bar.T, bar.L + 74.f, bar.B);
     mBlendOneRect = IRECT(mTitleRect.R + 4.f, bar.T, mTitleRect.R + 70.f, bar.B);
     mBlendDistinctRect = IRECT(mBlendOneRect.R, bar.T, mBlendOneRect.R + 60.f, bar.B);
-    mRangeRect = IRECT(mBlendDistinctRect.R + 8.f, bar.T, bar.R, bar.B);
+    mSnapRect = mHost.canSnap ? IRECT(mBlendDistinctRect.R + 6.f, bar.T, mBlendDistinctRect.R + 76.f, bar.B) : IRECT();
+    mRangeRect = IRECT((mHost.canSnap ? mSnapRect.R : mBlendDistinctRect.R) + 8.f, bar.T, bar.R, bar.B);
 
     const float headWidth = wide ? 196.f : 0.f;
     const float canvasLeft = inner.L + headWidth;
@@ -333,9 +394,10 @@ private:
     mTakeHead = IRECT(inner.L, mTakeCanvas.T, canvasLeft - 6.f, mTakeCanvas.B);
 
     mRows.clear();
+    mScrollTrack = {};
     const float top = mTakeCanvas.B + 4.f;
     const float available = std::max(0.f, inner.B - top);
-    const float minimum = wide ? 56.f : 84.f;
+    const float minimum = wide ? 56.f : 60.f;
     const size_t fit = std::max<size_t>(1, static_cast<size_t>(available / minimum));
     const size_t visible = std::min(fit, mLanes.size());
     if (visible == 0)
@@ -344,22 +406,36 @@ private:
       return;
     }
     mFirstLane = std::min(mFirstLane, mLanes.size() - visible);
-    const float rowHeight = std::min(available / static_cast<float>(visible), wide ? 140.f : 170.f);
+    const float rowHeight = std::min(available / static_cast<float>(visible), wide ? 140.f : 280.f);
+    const float right = visible < mLanes.size() ? inner.R - 9.f : inner.R;
+    if (visible < mLanes.size())
+      mScrollTrack = IRECT(inner.R - 5.f, top, inner.R, top + rowHeight * static_cast<float>(visible) - 3.f);
+    // Two lines of controls take 44 of a row, which is too much of a short one.
+    const bool oneLine = !wide && rowHeight - 47.f < 70.f;
     for (size_t i = 0; i < visible; ++i)
     {
       const float y = top + rowHeight * static_cast<float>(i);
-      const IRECT rowRect(inner.L, y, inner.R, y + rowHeight - 3.f);
+      const IRECT rowRect(inner.L, y, right, y + rowHeight - 3.f);
       Row row;
       row.head = wide ? IRECT(rowRect.L, rowRect.T, canvasLeft - 6.f, rowRect.B)
-                      : IRECT(rowRect.L, rowRect.T, rowRect.R, rowRect.T + 42.f);
+                      : IRECT(rowRect.L, rowRect.T, rowRect.R, rowRect.T + (oneLine ? 20.f : 42.f));
       row.canvas = wide ? IRECT(canvasLeft, rowRect.T, rowRect.R, rowRect.B)
                         : IRECT(rowRect.L, row.head.B + 2.f, rowRect.R, rowRect.B);
       const IRECT first(row.head.L, row.head.T, row.head.R, row.head.T + 20.f);
       row.remove = IRECT(first.R - 18.f, first.T + 1.f, first.R, first.B - 1.f);
-      row.name = IRECT(first.L, first.T + 1.f, row.remove.L - 4.f, first.B - 1.f);
-      const IRECT second(row.head.L, first.B + 1.f, row.head.R, first.B + 21.f);
-      row.dice = IRECT(second.R - 22.f, second.T, second.R, second.B);
-      row.prompt = IRECT(second.L, second.T, row.dice.L - 4.f, second.B);
+      if (oneLine)
+      {
+        row.dice = IRECT(row.remove.L - 26.f, first.T, row.remove.L - 4.f, first.B);
+        row.name = IRECT(first.L, first.T + 1.f, first.L + 104.f, first.B - 1.f);
+        row.prompt = IRECT(row.name.R + 4.f, first.T, row.dice.L - 4.f, first.B);
+      }
+      else
+      {
+        row.name = IRECT(first.L, first.T + 1.f, row.remove.L - 4.f, first.B - 1.f);
+        const IRECT second(row.head.L, first.B + 1.f, row.head.R, first.B + 21.f);
+        row.dice = IRECT(second.R - 22.f, second.T, second.R, second.B);
+        row.prompt = IRECT(second.L, second.T, row.dice.L - 4.f, second.B);
+      }
       mRows.push_back(row);
     }
   }
@@ -384,15 +460,26 @@ private:
     return std::clamp((canvas.B - kCurvePad - y) / std::max(1.f, canvas.H() - 2.f * kCurvePad), 0.f, 1.f) * kSA3MaxLaneAmount;
   }
 
-  void Snap(float& position, float& amount, const IMouseMod& mod) const
+  // Points land on the chosen division, and freehand strokes stay free. Ctrl steps the other way:
+  // free of the division while one is chosen, and onto the beat while none is.
+  void Snap(float& position, float& amount, const IMouseMod& mod, bool freehand) const
   {
-    if (!mod.C)
+    const double division = mHost.canSnap ? LaneSnapSeconds(mSnap, mBpm, mBeatsPerBar) : 0.0;
+    double step = 0.0;
+    if (mod.C)
+    {
+      const double beat = mBpm > 0.0 ? 60.0 / mBpm : 0.0;
+      if (division <= 0.0)
+        step = (mSeconds > 0.0 && beat > 0.0) ? beat / mSeconds : 1.0 / 16.0;
+      amount = std::round(amount / 0.05f) * 0.05f;
+    }
+    else if (!freehand && mSeconds > 0.0)
+      step = division / mSeconds;
+    if (step <= 0.0)
       return;
-    const double beat = mBpm > 0.0 ? 60.0 / mBpm : 0.0;
-    const double step = (mSeconds > 0.0 && beat > 0.0) ? beat / mSeconds : 1.0 / 16.0;
-    if (step > 0.0)
-      position = static_cast<float>(std::clamp(std::round(position / step) * step, 0.0, 1.0));
-    amount = std::round(amount / 0.05f) * 0.05f;
+    const double snapped = std::min(1.0, std::round(position / step) * step);
+    // The range rarely ends on the grid, but its end stays reachable.
+    position = static_cast<float>(1.0 - position < std::abs(position - snapped) ? 1.0 : snapped);
   }
 
   int HitPoint(const Row& row, const SA3Lane& lane, float x, float y) const
@@ -427,7 +514,7 @@ private:
 
     float position = PositionAt(row.canvas, x);
     float amount = AmountAt(row.canvas, y);
-    Snap(position, amount, mod);
+    Snap(position, amount, mod, mod.S);
     if (mod.S)
     {
       mDrag = Drag::Stroke;
@@ -500,6 +587,23 @@ private:
     Changed();
   }
 
+  void ScrollTo(float y)
+  {
+    mFirstLane = ScrollbarFirstAt(mScrollTrack, y, mRows.size(), mLanes.size());
+    SetDirty(false);
+  }
+
+  void OpenSnapMenu()
+  {
+    if (!GetUI())
+      return;
+    mSnapMenu.Clear();
+    for (const char* label : {"off", "1/4", "1/2", "1 bar"})
+      mSnapMenu.AddItem(label);
+    mSnapMenu.CheckItem(static_cast<int>(mSnap), true);
+    GetUI()->CreatePopupMenu(*this, mSnapMenu, mSnapRect);
+  }
+
   void SetCursor(ECursor cursor)
   {
     if (cursor == mCursor)
@@ -521,12 +625,6 @@ private:
     return mHost.isMissing && mHost.isMissing(lane);
   }
 
-  static std::string Fit(const std::string& text, float width)
-  {
-    const size_t chars = static_cast<size_t>(std::max(4.f, width / 5.8f));
-    return text.size() <= chars ? text : text.substr(0, chars - 2) + "..";
-  }
-
   void DrawTopBar(IGraphics& g)
   {
     g.DrawText(IText(13.f, COLOR_WHITE, FontName, EAlign::Near, EVAlign::Middle), "automation", mTitleRect);
@@ -538,19 +636,22 @@ private:
     segment(mBlendOneRect, "one song", mBlend == SA3LaneBlend::OneSong);
     segment(mBlendDistinctRect, "distinct", mBlend == SA3LaneBlend::Distinct);
 
-    std::string range;
-    char text[64] = {};
+    if (mHost.canSnap)
+    {
+      static const char* labels[] = {"snap off", "snap 1/4", "snap 1/2", "snap 1 bar"};
+      const bool on = mSnap != SA3LaneSnap::Off;
+      g.FillRect(ButtonFill(), mSnapRect);
+      g.DrawRect(on ? Red() : Frame(), mSnapRect);
+      g.DrawText(IText(10.f, on ? COLOR_WHITE : TextDim(), FontName, EAlign::Center, EVAlign::Middle),
+                 labels[static_cast<int>(mSnap)], mSnapRect);
+    }
+
+    std::string range = "set a range";
     if (mSeconds > 0.0)
     {
+      char text[64] = {};
       std::snprintf(text, sizeof(text), "%.2f s", mSeconds);
       range = text;
-    }
-    else
-      range = "set a range";
-    if (mLanes.size() > mRows.size() && !mRows.empty())
-    {
-      std::snprintf(text, sizeof(text), "lanes %zu-%zu of %zu  ·  ", mFirstLane + 1, mFirstLane + mRows.size(), mLanes.size());
-      range = text + range;
     }
     g.DrawText(IText(11.f, TextDim(), FontName, EAlign::Far, EVAlign::Middle), range.c_str(), mRangeRect);
   }
@@ -669,7 +770,7 @@ private:
     g.DrawRoundRect(color, row.name, CornerRadius);
     const std::string label = missing ? lane.name + " (missing)" : lane.name;
     g.DrawText(IText(11.f, missing ? TextDim() : COLOR_WHITE, FontName, EAlign::Near, EVAlign::Middle),
-               Fit(label, row.name.W() - 12.f).c_str(), row.name.GetHPadded(-5.f));
+               FitText(g, IText(11.f, COLOR_WHITE, FontName), label, row.name.W() - 10.f).c_str(), row.name.GetHPadded(-5.f));
     if (missing)
       DrawButton(g, row.remove, "x", FontName);
     else
@@ -682,7 +783,7 @@ private:
       g.DrawText(IText(11.f, TextFaint(), FontName, EAlign::Near, EVAlign::Middle), "uses the base prompt", promptText);
     else
       g.DrawText(IText(11.f, missing ? TextDim() : COLOR_WHITE, FontName, EAlign::Near, EVAlign::Middle),
-                 Fit(lane.prompt, promptText.W()).c_str(), promptText);
+                 FitText(g, IText(11.f, COLOR_WHITE, FontName), lane.prompt, promptText.W()).c_str(), promptText);
     DrawDice(g, row.dice);
 
     g.FillRect(IColor(255, 12, 12, 12), row.canvas);
@@ -713,6 +814,19 @@ private:
     g.DrawRect(FrameSoft(), row.canvas);
   }
 
+  void DrawPlayhead(IGraphics& g)
+  {
+    if (mPlayhead < 0.f)
+      return;
+    const auto line = [&](const IRECT& canvas) {
+      const float x = XAt(canvas, mPlayhead);
+      g.DrawLine(COLOR_WHITE, x, canvas.T, x, canvas.B, nullptr, 1.5f);
+    };
+    line(mTakeCanvas);
+    for (const Row& row : mRows)
+      line(row.canvas);
+  }
+
   void DrawReadout(IGraphics& g)
   {
     if (mHoverLane < 0)
@@ -735,21 +849,26 @@ private:
 
   std::vector<SA3Lane>& mLanes;
   SA3LaneBlend& mBlend;
+  SA3LaneSnap& mSnap;
   Host mHost;
 
   double mSeconds = 0.0;
   double mBpm = 0.0;
   double mBeatsPerBar = 4.0;
   std::vector<float> mPeaks;
+  float mPlayhead = -1.f;
 
+  IPopupMenu mSnapMenu;
   IRECT mTitleRect;
   IRECT mBlendOneRect;
   IRECT mBlendDistinctRect;
+  IRECT mSnapRect;
   IRECT mRangeRect;
   IRECT mTakeHead;
   IRECT mTakeCanvas;
   std::vector<Row> mRows;
   size_t mFirstLane = 0;
+  IRECT mScrollTrack;
 
   Drag mDrag = Drag::None;
   int mDragLane = -1;

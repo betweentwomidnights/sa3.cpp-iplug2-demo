@@ -162,9 +162,14 @@ public:
     g.DrawRoundRect(gary::ui::FrameSoft(), mRECT, gary::ui::CornerRadius);
     const IRECT textBounds = mRECT.GetPadded(-10.f);
     if (GetStr()[0] != '\0')
-      g.DrawText(mText, GetStr(), textBounds);
+      g.DrawText(mText, gary::ui::FitText(g, mText, GetStr(), textBounds.W()).c_str(), textBounds);
     else
       g.DrawText(mText.WithFGColor(gary::ui::TextFaint()), "describe the audio to generate…", textBounds);
+  }
+
+  void OnMouseDown(float, float, const IMouseMod&) override
+  {
+    gary::ui::OpenPromptEntry(*this, mRECT, GetStr(), mText.mSize);
   }
 };
 
@@ -1032,6 +1037,8 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
   IMPAPI(GetMediaSourceType);
   IMPAPI(TakeIsMIDI);
   IMPAPI(GetSet_LoopTimeRange2);
+  IMPAPI(GetPlayState);
+  IMPAPI(GetPlayPosition);
   IMPAPI(TimeMap_GetTimeSigAtTime);
   IMPAPI(ValidatePtr2);
   IMPAPI(CountTrackMediaItems);
@@ -1152,7 +1159,7 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
         if (IControl* control = ui->GetControlWithTag(kCtrlTagCreativeLoras))
           control->SetDirty(false);
     };
-    graphics->AttachControl(new gary::ui::SA3LaneEditorControl(initial, mLanes, mLaneBlend, std::move(laneHost)),
+    graphics->AttachControl(new gary::ui::SA3LaneEditorControl(initial, mLanes, mLaneBlend, mLaneSnap, std::move(laneHost)),
                             kCtrlTagAutomation);
 
     ApplyResponsiveLayout(graphics);
@@ -1194,6 +1201,7 @@ void SA3ReaperExtension::OnIdle()
 
   RefreshPanel(completed || decoderFinished || mRenderService.Busy()
                || mDecoderDownloadBusy.load(std::memory_order_acquire));
+  UpdateLanePlayhead();
 }
 
 void SA3ReaperExtension::OnActionRun(int, int)
@@ -1347,6 +1355,27 @@ double SA3ReaperExtension::LaneTimelineSeconds() const
   if (mOperation == Operation::Transform)
     return CurrentSourceLength();
   return std::max(0.0, mSelection.timeEnd - mSelection.timeStart);
+}
+
+// Where the curves' time zero sits in the project, read from the selection the render will replace.
+double SA3ReaperExtension::LaneTimelineStart() const
+{
+  if (mOperation == Operation::Generate)
+    return mSelection.timeStart;
+  const double sourceStart = mSelection.timeEnd > mSelection.timeStart ? std::max(mSelection.timeStart, mSelection.itemStart)
+                                                                       : mSelection.itemStart;
+  return mOperation == Operation::Continue ? sourceStart + CurrentSourceLength() : sourceStart;
+}
+
+// REAPER's transport is the only playback here, so the cursor just reads where it is each tick.
+void SA3ReaperExtension::UpdateLanePlayhead()
+{
+  IGraphics* ui = GetUI();
+  if (!ui || !mAutomationOn)
+    return;
+  const bool playing = (GetPlayState() & 1) != 0;
+  if (IControl* control = ui->GetControlWithTag(kCtrlTagAutomation))
+    control->As<gary::ui::SA3LaneEditorControl>()->SetPlayhead(playing ? GetPlayPosition() - LaneTimelineStart() : -1.0);
 }
 
 void SA3ReaperExtension::SetLaneBackdrop(const gary::RecordingSnapshot& audio, double startSeconds)
@@ -1825,6 +1854,7 @@ void SA3ReaperExtension::SaveProjectState(ProjectStateContext* context)
                    mGenerateKeepsGoing ? 1 : 0, mContinueKeepsGoing ? 1 : 0);
   context->AddLine("SA3_REAPER_AUTOMATION_ON %d", mAutomationOn ? 1 : 0);
   context->AddLine("SA3_REAPER_LANE_BLEND %d", mLaneBlend == gary::SA3LaneBlend::Distinct ? 1 : 0);
+  context->AddLine("SA3_REAPER_LANE_SNAP %d", static_cast<int>(mLaneSnap));
   for (const auto& lane : mLanes)
   {
     const std::string path = HexEncode(lane.path);
@@ -1950,6 +1980,14 @@ bool SA3ReaperExtension::LoadProjectStateLine(const char* line)
     return true;
   }
 
+  constexpr const char* snapPrefix = "SA3_REAPER_LANE_SNAP ";
+  if (std::strncmp(line, snapPrefix, std::strlen(snapPrefix)) == 0)
+  {
+    mLaneSnap = gary::LaneSnapFromIndex(std::atoi(line + std::strlen(snapPrefix)));
+    refreshLanes();
+    return true;
+  }
+
   constexpr const char* pointsPrefix = "SA3_REAPER_AUTOMATION_LANE_POINTS ";
   if (std::strncmp(line, pointsPrefix, std::strlen(pointsPrefix)) == 0)
   {
@@ -2004,6 +2042,7 @@ void SA3ReaperExtension::OnBeginLoadProjectState(bool)
   mPendingGeneration = {};
   mLanes.clear();
   mLaneBlend = gary::SA3LaneBlend::OneSong;
+  mLaneSnap = gary::SA3LaneSnap::Off;
   mAutomationOn = false;
   ApplyResponsiveLayout(GetUI());
   if (IGraphics* ui = GetUI())
