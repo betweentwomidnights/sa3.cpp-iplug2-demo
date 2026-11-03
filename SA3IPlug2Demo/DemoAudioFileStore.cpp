@@ -481,7 +481,9 @@ std::vector<std::string> LoadPromptPoolForLoraSource(const std::string& sourcePa
 
 // Native in-process safetensors->gguf via libsa3's V1 table (no Python). Loads sa3.dll from beside
 // this module (same resolution the render path uses). Returns: 1 converted, 0 native unavailable (fall back
-// to Python), -1 native ran but the conversion failed (error set).
+// to Python), -1 native ran but the conversion failed (error set). The library stays loaded, as it does
+// for rendering: ggml installs a terminate handler when it loads and asserts if it finds its own still
+// there, so unloading makes the next import abort the host.
 int TryNativeConvertLora(const std::string& exportedBase, const std::string& destination, std::string& error)
 {
 #if defined(_WIN32)
@@ -506,7 +508,8 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
   auto getApi = reinterpret_cast<GetApiFn>(GetProcAddress(dll, "sa3_get_api"));
   const sa3_api_v1* api = getApi ? getApi(SA3_ABI_VERSION_1) : nullptr;
-  if (!api || api->size < SA3_API_V1_MIN_SIZE) { FreeLibrary(dll); return 0; }
+  if (!api || api->size < SA3_API_V1_MIN_SIZE)
+    return 0;
 #elif defined(__APPLE__)
   Dl_info self = {};
   if (dladdr(reinterpret_cast<const void*>(&TryNativeConvertLora), &self) == 0 || !self.dli_fname)
@@ -519,7 +522,8 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
   auto getApi = reinterpret_cast<GetApiFn>(dlsym(dll, "sa3_get_api"));
   const sa3_api_v1* api = getApi ? getApi(SA3_ABI_VERSION_1) : nullptr;
-  if (!api || api->size < SA3_API_V1_MIN_SIZE) { dlclose(dll); return 0; }
+  if (!api || api->size < SA3_API_V1_MIN_SIZE)
+    return 0;
 #else
   return 0;
 #endif
@@ -536,11 +540,6 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   abiError.size = sizeof(abiError);
   api->error_init(&abiError);
   const sa3_status_v1 status = api->convert_lora(&options, &abiError);
-#if defined(_WIN32)
-  FreeLibrary(dll);
-#elif defined(__APPLE__)
-  dlclose(dll);
-#endif
   if (status != SA3_STATUS_OK_V1) { error = std::string("libsa3 convert: ") + abiError.message; return -1; }
   return 1;
 }
