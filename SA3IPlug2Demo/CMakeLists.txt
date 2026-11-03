@@ -16,6 +16,11 @@ iplug_add_plugin(${PROJECT_NAME}
     DemoAudioFileStore.cpp
     DemoAudioFileStore.h
     DemoUIPrimitives.h
+    ${CMAKE_SOURCE_DIR}/Shared/SA3RenderService.cpp
+    ${CMAKE_SOURCE_DIR}/Shared/SA3RenderService.h
+    ${CMAKE_SOURCE_DIR}/Shared/SA3LaneModel.h
+    ${CMAKE_SOURCE_DIR}/Shared/SA3LaneEditor.h
+    ${CMAKE_SOURCE_DIR}/Shared/SA3PromptOptions.h
     config.h
     resources/main.rc
     resources/resource.h

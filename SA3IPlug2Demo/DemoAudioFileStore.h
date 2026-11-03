@@ -43,8 +43,7 @@ bool SaveSetting(const std::string& key, const std::string& value);    // upsert
 struct PersistedCreativeLora
 {
   std::string path;
-  float strength = 1.f;
-  bool enabled = true;
+  float strength = 0.f;   // 0 leaves the LoRA out of a render
 };
 
 std::vector<PersistedCreativeLora> LoadCreativeLoraRegistry(const std::string& variant);

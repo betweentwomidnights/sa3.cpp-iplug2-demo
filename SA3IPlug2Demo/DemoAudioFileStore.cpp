@@ -1951,9 +1951,10 @@ std::vector<PersistedCreativeLora> LoadCreativeLoraRegistry(const std::string& v
       if (end != strengthText.c_str() && (!end || *end == '\0') && std::isfinite(parsed))
         lora.strength = std::clamp(parsed, 0.f, 2.f);
     }
+    // Strength alone now says whether a LoRA is in use; one saved as switched off stays out.
     const std::string enabledText = LoadSetting(prefix + "enabled");
     if (enabledText == "0" || enabledText == "false" || enabledText == "off")
-      lora.enabled = false;
+      lora.strength = 0.f;
     loras.push_back(std::move(lora));
   }
   return loras;
@@ -1974,7 +1975,8 @@ bool SaveCreativeLoraRegistry(const std::string& variant,
     std::snprintf(strength, sizeof(strength), "%.3f", std::clamp(loras[i].strength, 0.f, 2.f));
     saved = SaveSetting(prefix + "path", loras[i].path) && saved;
     saved = SaveSetting(prefix + "strength", strength) && saved;
-    saved = SaveSetting(prefix + "enabled", loras[i].enabled ? "1" : "0") && saved;
+    // Overwrites an older "off", which would otherwise zero this strength on every load.
+    saved = SaveSetting(prefix + "enabled", "1") && saved;
   }
   // Count is written last so an interrupted update cannot expose partial entries.
   saved = SaveSetting(registryPrefix + "count", std::to_string(count)) && saved;

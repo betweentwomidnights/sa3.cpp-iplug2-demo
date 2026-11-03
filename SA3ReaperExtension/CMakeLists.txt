@@ -15,6 +15,9 @@ set(SA3_REAPER_SOURCES
   SA3ReaperExtension.h
   ${CMAKE_SOURCE_DIR}/Shared/SA3RenderService.cpp
   ${CMAKE_SOURCE_DIR}/Shared/SA3RenderService.h
+  ${CMAKE_SOURCE_DIR}/Shared/SA3LaneModel.h
+  ${CMAKE_SOURCE_DIR}/Shared/SA3LaneEditor.h
+  ${CMAKE_SOURCE_DIR}/Shared/SA3PromptOptions.h
   ${CMAKE_SOURCE_DIR}/SA3IPlug2Demo/DemoAudioFileStore.cpp
   ${CMAKE_SOURCE_DIR}/SA3IPlug2Demo/DemoAudioFileStore.h
   config.h
@@ -50,6 +53,7 @@ endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE
   SA3_DEMO_DEFAULT_MODELS_DIR="${SA3_CPP_DIR}/models"
   SA3_DEMO_SA3_CPP_DIR="${SA3_CPP_DIR}"
+  SA3_RUNTIME_SUBDIR="SA3ReaperExtension"
 )
 
 iplug_configure_reaperext(${PROJECT_NAME} ${PROJECT_NAME})

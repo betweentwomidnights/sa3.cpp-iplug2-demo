@@ -52,5 +52,14 @@ inline void DrawTab(IGraphics& g, const IRECT& bounds, const char* label, const 
              label, bounds.GetPadded(-4.f));
 }
 
+inline void DrawSegment(IGraphics& g, const IRECT& bounds, const char* label, const char* fontName,
+                        float textSize, bool active)
+{
+  g.FillRoundRect(active ? Red() : ButtonFill(), bounds, 3.f);
+  g.DrawRoundRect(active ? Red() : Frame(), bounds, 3.f);
+  g.DrawText(IText(textSize, active ? COLOR_BLACK : COLOR_WHITE, fontName, EAlign::Center, EVAlign::Middle),
+             label, bounds);
+}
+
 }
 
