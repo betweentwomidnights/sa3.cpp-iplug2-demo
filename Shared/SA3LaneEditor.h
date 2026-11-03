@@ -406,16 +406,23 @@ private:
       return;
     }
     mFirstLane = std::min(mFirstLane, mLanes.size() - visible);
-    const float rowHeight = std::min(available / static_cast<float>(visible), wide ? 140.f : 280.f);
+    // Lanes stop growing at a comfortable height. What's left widens the gaps between them, and the
+    // rest sits evenly above and below so a few lanes don't hang from the top of the column.
+    const float count = static_cast<float>(visible);
+    const float tallest = wide ? 140.f : 200.f;
+    const float gap = visible > 1 ? std::clamp((available - tallest * count) / (count - 1.f), 3.f, 24.f) : 3.f;
+    const float rowHeight = std::min((available - gap * (count - 1.f)) / count, tallest);
+    const float stackHeight = rowHeight * count + gap * (count - 1.f);
+    const float stackTop = top + std::floor(std::max(0.f, available - stackHeight) * 0.5f);
     const float right = visible < mLanes.size() ? inner.R - 9.f : inner.R;
     if (visible < mLanes.size())
-      mScrollTrack = IRECT(inner.R - 5.f, top, inner.R, top + rowHeight * static_cast<float>(visible) - 3.f);
+      mScrollTrack = IRECT(inner.R - 5.f, stackTop, inner.R, stackTop + stackHeight);
     // Two lines of controls take 44 of a row, which is too much of a short one.
-    const bool oneLine = !wide && rowHeight - 47.f < 70.f;
+    const bool oneLine = !wide && rowHeight - 44.f < 70.f;
     for (size_t i = 0; i < visible; ++i)
     {
-      const float y = top + rowHeight * static_cast<float>(i);
-      const IRECT rowRect(inner.L, y, right, y + rowHeight - 3.f);
+      const float y = stackTop + (rowHeight + gap) * static_cast<float>(i);
+      const IRECT rowRect(inner.L, y, right, y + rowHeight);
       Row row;
       row.head = wide ? IRECT(rowRect.L, rowRect.T, canvasLeft - 6.f, rowRect.B)
                       : IRECT(rowRect.L, rowRect.T, rowRect.R, rowRect.T + (oneLine ? 20.f : 42.f));
