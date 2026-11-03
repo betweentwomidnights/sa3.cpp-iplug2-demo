@@ -2325,6 +2325,20 @@ void SA3IPlug2Demo::PersistCreativeLoras()
   mCreativeLorasDirty.store(!saved, std::memory_order_release);
 }
 
+#ifndef _WIN32
+// Empty when cancelled. Windows keeps its ANSI dialogs: the file store opens narrow paths, which there
+// means the system code page rather than the UTF-8 PromptForFile returns.
+static std::string ChooseFile(IGraphics* ui, const char* extensions)
+{
+  if (!ui)
+    return {};
+  WDL_String fileName;
+  WDL_String directory;
+  ui->PromptForFile(fileName, directory, EFileAction::Open, extensions);
+  return fileName.Get();
+}
+#endif
+
 bool SA3IPlug2Demo::ImportLoraFromDialog()
 {
 #ifdef _WIN32
@@ -2340,6 +2354,11 @@ bool SA3IPlug2Demo::ImportLoraFromDialog()
 
   if (!GetOpenFileNameA(&ofn))
     return false;
+#else
+  const std::string fileName = ChooseFile(GetUI(), "gguf safetensors ckpt");
+  if (fileName.empty())
+    return false;
+#endif
 
   const auto info = gary::ImportLoraFile(fileName);
   if (!info.ok)
@@ -2365,10 +2384,6 @@ bool SA3IPlug2Demo::ImportLoraFromDialog()
   if (mAutomationOn)
     SyncLanesToLoras();
   return true;
-#else
-  SetStatus("LoRA file picker is only implemented for Windows in this demo");
-  return false;
-#endif
 }
 
 void SA3IPlug2Demo::RemoveLora(size_t index)
@@ -2748,6 +2763,11 @@ bool SA3IPlug2Demo::ImportDecoderLoraFromDialog()
   ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
   ofn.lpstrTitle = "Choose SAME-L decoder correction LoRA";
   if (!GetOpenFileNameA(&ofn)) return false;
+#else
+  const std::string fileName = ChooseFile(GetUI(), "gguf safetensors");
+  if (fileName.empty())
+    return false;
+#endif
   const auto info = gary::ImportLoraFile(fileName);
   if (!info.ok) { SetStatus("decoder LoRA import failed: " + info.error); return false; }
   {
@@ -2759,10 +2779,6 @@ bool SA3IPlug2Demo::ImportDecoderLoraFromDialog()
   gary::SaveSetting("decoder_lora_same_l_enabled", "1");
   SetStatus("SAME-L decoder correction selected: " + FileNameFromPath(info.path));
   return true;
-#else
-  SetStatus("decoder LoRA file picker is currently available on Windows");
-  return false;
-#endif
 }
 
 void SA3IPlug2Demo::SetPeakNormalizeEnabled(bool enabled)

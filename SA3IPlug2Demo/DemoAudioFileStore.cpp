@@ -57,6 +57,11 @@ constexpr const char* kLoraFolderName = "loras";
 #define SA3_DEMO_SA3_CPP_DIR "sa3.cpp"
 #endif
 
+// Where libsa3 sits relative to this module. The extension keeps it in a folder of its own.
+#ifndef SA3_RUNTIME_SUBDIR
+#define SA3_RUNTIME_SUBDIR ""
+#endif
+
 std::string ExtensionLower(const std::string& path);
 
 std::string JoinPath(const std::string& left, const char* right)
@@ -479,8 +484,8 @@ std::vector<std::string> LoadPromptPoolForLoraSource(const std::string& sourcePa
   return prompts;
 }
 
-// Native in-process safetensors->gguf via libsa3's V1 table (no Python). Loads sa3.dll from beside
-// this module (same resolution the render path uses). Returns: 1 converted, 0 native unavailable (fall back
+// Native in-process safetensors->gguf via libsa3's V1 table (no Python). Loads sa3.dll from the same
+// place the render path does. Returns: 1 converted, 0 native unavailable (fall back
 // to Python), -1 native ran but the conversion failed (error set). The library stays loaded, as it does
 // for rendering: ggml installs a terminate handler when it loads and asserts if it finds its own still
 // there, so unloading makes the next import abort the host.
@@ -499,7 +504,14 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   const size_t slash = path.find_last_of(L"\\/");
   if (slash == std::wstring::npos)
     return 0;
-  const std::wstring dllPath = path.substr(0, slash) + L"\\sa3.dll";
+  std::wstring dllPath = path.substr(0, slash + 1);
+  const std::string subdir = SA3_RUNTIME_SUBDIR;
+  if (!subdir.empty())
+  {
+    dllPath.append(subdir.begin(), subdir.end());
+    dllPath += L'\\';
+  }
+  dllPath += L"sa3.dll";
 
   HMODULE dll = LoadLibraryExW(dllPath.c_str(), nullptr,
                                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
@@ -517,7 +529,12 @@ int TryNativeConvertLora(const std::string& exportedBase, const std::string& des
   const std::string module(self.dli_fname);
   const size_t slash = module.find_last_of('/');
   if (slash == std::string::npos) return 0;
-  void* dll = dlopen((module.substr(0, slash) + "/libsa3.dylib").c_str(), RTLD_NOW | RTLD_LOCAL);
+  std::string dllPath = module.substr(0, slash + 1);
+  const std::string subdir = SA3_RUNTIME_SUBDIR;
+  if (!subdir.empty())
+    dllPath += subdir + "/";
+  dllPath += "libsa3.dylib";
+  void* dll = dlopen(dllPath.c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!dll) return 0;
   using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
   auto getApi = reinterpret_cast<GetApiFn>(dlsym(dll, "sa3_get_api"));
