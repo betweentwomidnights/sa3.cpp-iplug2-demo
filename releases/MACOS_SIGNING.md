@@ -3,6 +3,13 @@
 These steps apply to every Mac release. Each version's own guide in `releases/<version>/` covers what
 to build and test.
 
+`sign-and-notarize.sh` runs all of the steps below, on the Mac that holds the signing identity. Its
+usage comment describes the folder layout it expects:
+
+```sh
+releases/sign-and-notarize.sh <notary-profile> <stage-dir>
+```
+
 Before signing, check that `@loader_path` is the only rpath on each bundled dylib. This covers the
 VST3, the app and the REAPER folder:
 
