@@ -306,8 +306,8 @@ public:
     else if (!canRender)                  runHint = "drop audio or save a recorded buffer first";
     else if (mPlugin.TransportRunning())  runHint = "host rolling: recording input";
     else                                  runHint = "host stopped";
-    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               runHint.c_str(), IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
+    g.DrawMultiLineText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
+                        runHint.c_str(), IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
     y += 42.f;
 
     const float outputHeight = std::min(190.f, std::max(150.f, shell.B - y - 14.f));
