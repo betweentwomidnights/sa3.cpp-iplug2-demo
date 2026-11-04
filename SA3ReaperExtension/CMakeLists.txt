@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SA3ReaperExtension VERSION 0.4.1)
+project(SA3ReaperExtension VERSION 0.5.0)
 
 if(NOT WIN32 AND NOT APPLE)
   message(STATUS "SA3ReaperExtension is only supported on Windows and macOS. Skipping.")
