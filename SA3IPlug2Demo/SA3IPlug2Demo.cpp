@@ -306,8 +306,8 @@ public:
     else if (!canRender)                  runHint = "drop audio or save a recorded buffer first";
     else if (mPlugin.TransportRunning())  runHint = "host rolling: recording input";
     else                                  runHint = "host stopped";
-    g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
-               runHint.c_str(), IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
+    g.DrawMultiLineText(IText(11.f, TextDim(), kDemoFont, EAlign::Far, EVAlign::Middle),
+                        runHint.c_str(), IRECT(mRunRect.R + 10.f, y, right, y + 32.f));
     y += 42.f;
 
     const float outputHeight = std::min(190.f, std::max(150.f, shell.B - y - 14.f));
@@ -3092,22 +3092,6 @@ void SA3IPlug2Demo::MixOutputPlayback(sample** outputs, int nOutChans, int nFram
 
 // ----- v0.3.0 model downloader (runs on its own worker thread; never the audio thread) ----------------
 
-namespace
-{
-std::string HumanBytes(long long bytes)
-{
-  if (bytes < 0)
-    return "?";
-  const double mb = (double)bytes / (1024.0 * 1024.0);
-  char text[32] = {};
-  if (mb >= 1024.0)
-    std::snprintf(text, sizeof text, "%.2f GB", mb / 1024.0);
-  else
-    std::snprintf(text, sizeof text, "%.0f MB", mb);
-  return text;
-}
-} // namespace
-
 void SA3IPlug2Demo::StartModelDownload(int variantIdx, const std::string& destDir)
 {
   if (destDir.empty())
@@ -3155,132 +3139,18 @@ void SA3IPlug2Demo::StopDownloadWorker()
 void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
 {
   const std::string variant = (variantIdx == 1) ? "small-music" : "medium";
-  auto finish = [this]() {
-    mDownloadProgress.store(0.0f, std::memory_order_release);
-    mDownloading.store(false, std::memory_order_release);
-    mDownloadKind.store(0, std::memory_order_release);
-  };
-
-  const std::vector<gary::ModelDownloadItem> plan = gary::ModelPlan(variant, "f16");
-
-  // Probe sizes up front so the progress bar is byte-accurate. If any HEAD fails we fall back to a
-  // coarse file-count bar (still resumable/correct — just a less smooth meter).
-  std::vector<long long> sizes(plan.size(), -1);
-  long long total = 0;
-  bool totalKnown = true;
-  for (size_t i = 0; i < plan.size(); ++i)
-  {
-    if (mDownloadCancel.load(std::memory_order_acquire)) { SetStatus("download cancelled"); finish(); return; }
-    SetStatus("checking " + std::string(plan[i].what) + " (" + std::to_string(i + 1) + "/"
-              + std::to_string(plan.size()) + ")");
-    sizes[i] = gary::HttpContentLength(gary::HuggingFaceResolveUrl(plan[i].repo, plan[i].filename));
-    if (sizes[i] > 0) total += sizes[i];
-    else totalKnown = false;
-  }
-
-  long long completed = 0;   // bytes of fully-finished files (byte mode)
-  for (size_t i = 0; i < plan.size(); ++i)
-  {
-    if (mDownloadCancel.load(std::memory_order_acquire)) { SetStatus("download cancelled"); finish(); return; }
-
-    const std::string dest = gary::PathToUtf8(gary::PathFromUtf8(destDir) / plan[i].filename);
-    const std::string url = gary::HuggingFaceResolveUrl(plan[i].repo, plan[i].filename);
-    const long long expected = sizes[i];
-    long long localSize = (long long)gary::FileSizeBytes(dest);
-
-    if (expected > 0 && localSize == expected)   // already complete — skip (matches models.sh)
-    {
-      completed += expected;
-      if (totalKnown && total > 0)
-        mDownloadProgress.store((float)((double)completed / (double)total), std::memory_order_release);
-      continue;
-    }
-    if (expected > 0 && localSize > expected)     // corrupt/oversized — restart this file fresh
-    {
-      gary::RemoveFile(dest);
-      localSize = 0;
-    }
-
-    std::string spawnErr;
-    gary::AsyncProcess proc = gary::StartProcess(
-        {"curl", "-fL", "--retry", "3", "-C", "-", "-o", dest, url}, spawnErr);
-    if (!proc.valid)
-    {
-      SetStatus("download failed to start: " + spawnErr);
-      finish();
-      return;
-    }
-
-    int exitCode = 1;
-    for (;;)
-    {
-      const bool done = gary::ProcessTryWait(proc, &exitCode);
-      const long long now = (long long)gary::FileSizeBytes(dest);
-      if (totalKnown && total > 0)
-      {
-        const double frac = (double)(completed + now) / (double)total;
-        mDownloadProgress.store((float)std::min(1.0, std::max(0.0, frac)), std::memory_order_release);
-        char pct[8] = {};
-        std::snprintf(pct, sizeof pct, "%.0f%%", std::min(1.0, frac) * 100.0);
-        SetStatus("downloading " + std::string(plan[i].what) + " " + std::to_string(i + 1) + "/"
-                  + std::to_string(plan.size()) + " — " + pct);
-      }
-      else
-      {
-        mDownloadProgress.store((float)i / (float)plan.size(), std::memory_order_release);
-        SetStatus("downloading " + std::string(plan[i].what) + " " + std::to_string(i + 1) + "/"
-                  + std::to_string(plan.size()) + " — " + HumanBytes(now));
-      }
-
-      if (done)
-        break;
-      if (mDownloadCancel.load(std::memory_order_acquire))
-      {
-        gary::ProcessTerminate(proc);
-        gary::ProcessClose(proc);
-        SetStatus("download cancelled (partial files kept — resume any time)");
-        finish();
-        return;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-    gary::ProcessClose(proc);
-
-    if (exitCode != 0)
-    {
-      SetStatus("download failed on " + std::string(plan[i].what) + " (curl exit "
-                + std::to_string(exitCode) + ") — click models to retry (resumes)");
-      finish();
-      return;
-    }
-    // Integrity guard: a size mismatch means a truncated/garbage file — better to fail loudly here than
-    // hand libsa3 a corrupt gguf. Delete it so the retry starts clean instead of resuming garbage.
-    if (expected > 0 && (long long)gary::FileSizeBytes(dest) != expected)
-    {
-      gary::RemoveFile(dest);
-      SetStatus("download of " + std::string(plan[i].what) + " was incomplete — click models to retry");
-      finish();
-      return;
-    }
-    completed += (expected > 0) ? expected : (long long)gary::FileSizeBytes(dest);
-  }
-
-  // Validate + persist. UseModelsFolder tears down any stale context and flips ModelsPresent on.
-  std::vector<std::string> missing;
-  if (gary::ModelSetComplete(destDir, variant, "f16", missing))
-  {
+  const gary::ModelDownloadResult result = gary::DownloadModelSet(destDir, variant, mDownloadCancel,
+    [this](const std::string& status, float progress) {
+      mDownloadProgress.store(progress, std::memory_order_release);
+      SetStatus(status);
+    });
+  // UseModelsFolder tears down any stale context and flips ModelsPresent on.
+  if (result.complete)
     UseModelsFolder(destDir, variant, /*persist=*/true);
-    mDownloadProgress.store(1.0f, std::memory_order_release);
-    SetStatus("models ready (" + variant + ") — you can generate now");
-  }
-  else
-  {
-    std::string msg = "download finished but the set looks incomplete: ";
-    for (size_t i = 0; i < missing.size(); ++i)
-      msg += (i ? ", " : "") + missing[i];
-    SetStatus(msg);
-  }
-  finish();
+  SetStatus(result.message);
+  mDownloadProgress.store(0.0f, std::memory_order_release);
+  mDownloading.store(false, std::memory_order_release);
+  mDownloadKind.store(0, std::memory_order_release);
 }
 
 void SA3IPlug2Demo::StartDecoderLoraDownload()
@@ -3331,8 +3201,8 @@ void SA3IPlug2Demo::DecoderLoraDownloadWorkerMain()
       const long long now = (long long)gary::FileSizeBytes(dest);
       if (expected > 0)
         mDownloadProgress.store((float)std::clamp((double)now / (double)expected, 0.0, 1.0), std::memory_order_release);
-      SetStatus("downloading decoder correction - " + (expected > 0 ? HumanBytes(now) + " / " + HumanBytes(expected)
-                                                               : HumanBytes(now)));
+      SetStatus("downloading decoder correction - " + (expected > 0 ? gary::HumanBytes(now) + " / " + gary::HumanBytes(expected)
+                                                               : gary::HumanBytes(now)));
       if (done) break;
       if (mDownloadCancel.load(std::memory_order_acquire))
       {

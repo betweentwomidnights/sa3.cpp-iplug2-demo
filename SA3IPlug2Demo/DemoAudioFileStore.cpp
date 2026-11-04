@@ -2278,4 +2278,118 @@ long long HttpContentLength(const std::string& url)
   return contentLength;
 }
 
+std::string HumanBytes(long long bytes)
+{
+  if (bytes < 0)
+    return "?";
+  const double mb = (double)bytes / (1024.0 * 1024.0);
+  char text[32] = {};
+  if (mb >= 1024.0)
+    std::snprintf(text, sizeof text, "%.2f GB", mb / 1024.0);
+  else
+    std::snprintf(text, sizeof text, "%.0f MB", mb);
+  return text;
+}
+
+ModelDownloadResult DownloadModelSet(const std::string& destDir, const std::string& variant,
+                                     const std::atomic<bool>& cancel,
+                                     const std::function<void(const std::string&, float)>& report)
+{
+  const std::vector<ModelDownloadItem> plan = ModelPlan(variant, "f16");
+  const std::string fileCount = std::to_string(plan.size());
+
+  // Probe sizes up front so the progress bar is byte-accurate. If any HEAD fails we fall back to a
+  // coarse file-count bar (still resumable/correct — just a less smooth meter).
+  std::vector<long long> sizes(plan.size(), -1);
+  long long total = 0;
+  bool totalKnown = true;
+  for (size_t i = 0; i < plan.size(); ++i)
+  {
+    if (cancel.load(std::memory_order_acquire))
+      return {false, "download cancelled"};
+    report("checking " + std::string(plan[i].what) + " (" + std::to_string(i + 1) + "/" + fileCount + ")", 0.f);
+    sizes[i] = HttpContentLength(HuggingFaceResolveUrl(plan[i].repo, plan[i].filename));
+    if (sizes[i] > 0) total += sizes[i];
+    else totalKnown = false;
+  }
+
+  long long completed = 0;   // bytes of fully-finished files (byte mode)
+  for (size_t i = 0; i < plan.size(); ++i)
+  {
+    if (cancel.load(std::memory_order_acquire))
+      return {false, "download cancelled"};
+
+    const std::string what = plan[i].what;
+    const std::string position = what + " " + std::to_string(i + 1) + "/" + fileCount;
+    const std::string dest = PathToUtf8(PathFromUtf8(destDir) / plan[i].filename);
+    const std::string url = HuggingFaceResolveUrl(plan[i].repo, plan[i].filename);
+    const long long expected = sizes[i];
+    const long long localSize = (long long)FileSizeBytes(dest);
+
+    if (expected > 0 && localSize == expected)   // already complete — skip (matches models.sh)
+    {
+      completed += expected;
+      report("already have " + position,
+             totalKnown && total > 0 ? (float)((double)completed / (double)total) : (float)i / (float)plan.size());
+      continue;
+    }
+    if (expected > 0 && localSize > expected)     // corrupt/oversized — restart this file fresh
+      RemoveFile(dest);
+
+    std::string spawnErr;
+    AsyncProcess proc = StartProcess({"curl", "-fL", "--retry", "3", "-C", "-", "-o", dest, url}, spawnErr);
+    if (!proc.valid)
+      return {false, "download failed to start: " + spawnErr};
+
+    int exitCode = 1;
+    for (;;)
+    {
+      const bool done = ProcessTryWait(proc, &exitCode);
+      const long long now = (long long)FileSizeBytes(dest);
+      if (totalKnown && total > 0)
+      {
+        const double frac = std::min(1.0, std::max(0.0, (double)(completed + now) / (double)total));
+        char pct[8] = {};
+        std::snprintf(pct, sizeof pct, "%.0f%%", frac * 100.0);
+        report("downloading " + position + " — " + pct, (float)frac);
+      }
+      else
+        report("downloading " + position + " — " + HumanBytes(now), (float)i / (float)plan.size());
+
+      if (done)
+        break;
+      if (cancel.load(std::memory_order_acquire))
+      {
+        ProcessTerminate(proc);
+        ProcessClose(proc);
+        return {false, "download cancelled (partial files kept — resume any time)"};
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    ProcessClose(proc);
+
+    if (exitCode != 0)
+      return {false, "download failed on " + what + " (curl exit " + std::to_string(exitCode)
+                     + ") — download again to resume"};
+    // Integrity guard: a size mismatch means a truncated/garbage file — better to fail loudly here than
+    // hand libsa3 a corrupt gguf. Delete it so the retry starts clean instead of resuming garbage.
+    if (expected > 0 && (long long)FileSizeBytes(dest) != expected)
+    {
+      RemoveFile(dest);
+      return {false, "download of " + what + " was incomplete — download again to retry"};
+    }
+    completed += (expected > 0) ? expected : (long long)FileSizeBytes(dest);
+  }
+
+  std::vector<std::string> missing;
+  if (!ModelSetComplete(destDir, variant, "f16", missing))
+  {
+    std::string message = "download finished but the set looks incomplete: ";
+    for (size_t i = 0; i < missing.size(); ++i)
+      message += (i ? ", " : "") + missing[i];
+    return {false, message};
+  }
+  return {true, "models ready (" + variant + ") — you can generate now"};
+}
+
 } // namespace gary

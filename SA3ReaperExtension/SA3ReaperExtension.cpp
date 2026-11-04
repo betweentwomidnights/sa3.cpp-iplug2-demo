@@ -622,6 +622,17 @@ public:
   void OnMouseDown(float x, float y, const IMouseMod&) override
   {
     if (mModelMenuRect.Contains(x, y)) { OpenModelMenu(); return; }
+    if (mModelDownloadRect.Contains(x, y))
+    {
+      if (mOwner.mModelDownloadBusy.load(std::memory_order_acquire))
+      {
+        mOwner.CancelModelDownload();
+        SetDirty(false);
+      }
+      else
+        OpenDownloadMenu();
+      return;
+    }
     if (mModelsFolderRect.Contains(x, y)) { mOwner.ChooseModelsFolder(); SetDirty(false); return; }
     if (mResidencyToggleRect.Contains(x, y)) { mOwner.SetKeepModelsResident(!mOwner.mKeepModelsResident); SetDirty(false); return; }
     if (mDecoderToggleRect.Contains(x, y)) { mOwner.SetDecoderLoraEnabled(!mOwner.mDecoderLoraEnabled); SetDirty(false); return; }
@@ -653,11 +664,16 @@ public:
     if (menu)
     {
       const int selected = menu->GetChosenItemIdx();
-      if (selected == 0)
-        mOwner.SelectModelVariant("medium");
-      else if (selected == 1)
-        mOwner.SelectModelVariant("small-music");
+      const std::string variant = selected == 0 ? "medium" : selected == 1 ? "small-music" : "";
+      if (!variant.empty())
+      {
+        if (mDownloadMenuOpen)
+          mOwner.StartModelDownload(variant);
+        else
+          mOwner.SelectModelVariant(variant.c_str());
+      }
     }
+    mDownloadMenuOpen = false;
     SetDirty(false);
   }
 
@@ -703,10 +719,11 @@ private:
   {
     g.DrawText(IText(13.f, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle),
                "generation model", IRECT(card.L + 10.f, card.T + 4.f, card.L + 126.f, card.T + 24.f));
-    const bool ready = mOwner.mModelVariant == "medium" ? mOwner.mMediumModelsAvailable
-                                                         : mOwner.mSmallModelsAvailable;
+    const bool ready = mOwner.ModelsReady();
     const std::string folder = FileNameOnly(mOwner.mModelsDir);
-    const std::string detail = (ready ? "ready" : "missing") + (folder.empty() ? "" : "  /  " + folder);
+    const bool downloading = mOwner.mModelDownloadBusy.load(std::memory_order_acquire);
+    const std::string detail = downloading ? mOwner.ModelDownloadStatus()
+                             : (ready ? "ready" : "missing") + (folder.empty() ? "" : "  /  " + folder);
     g.DrawText(IText(10.f, ready ? gary::ui::Green() : gary::ui::TextDim(), gary::ui::FontName,
                      EAlign::Near, EVAlign::Middle), CompactText(detail, 54).c_str(),
                IRECT(card.L + 132.f, card.T + 4.f, card.R - 10.f, card.T + 24.f));
@@ -714,12 +731,17 @@ private:
     const float left = card.L + 10.f;
     const float right = card.R - 10.f;
     const float gap = 6.f;
-    const float width = (right - left - gap) * 0.5f;
+    const float width = (right - left - gap * 2.f) / 3.f;
     mModelMenuRect = IRECT(left, card.T + 31.f, left + width, card.T + 57.f);
-    mModelsFolderRect = IRECT(mModelMenuRect.R + gap, mModelMenuRect.T, right, mModelMenuRect.B);
+    mModelsFolderRect = IRECT(mModelMenuRect.R + gap, mModelMenuRect.T,
+                              mModelMenuRect.R + gap + width, mModelMenuRect.B);
+    mModelDownloadRect = IRECT(mModelsFolderRect.R + gap, mModelMenuRect.T, right, mModelMenuRect.B);
     const std::string modelLabel = mOwner.mModelVariant + "  v";
-    gary::ui::DrawButton(g, mModelMenuRect, modelLabel.c_str(), gary::ui::FontName);
-    gary::ui::DrawButton(g, mModelsFolderRect, "models folder", gary::ui::FontName);
+    gary::ui::DrawButton(g, mModelMenuRect, modelLabel.c_str(), gary::ui::FontName, false, !downloading);
+    gary::ui::DrawButton(g, mModelsFolderRect, "models folder", gary::ui::FontName, false, !downloading);
+    gary::ui::DrawButton(g, mModelDownloadRect, downloading ? "cancel" : "download", gary::ui::FontName);
+    if (downloading)
+      mModelMenuRect = mModelsFolderRect = {};
     mResidencyToggleRect = IRECT(left, card.T + 62.f, right, card.B - 5.f);
     DrawToggle(g, mResidencyToggleRect,
                "keep models resident (uses GPU memory while idle)", mOwner.mKeepModelsResident);
@@ -736,6 +758,17 @@ private:
     smallMusic->SetEnabled(mOwner.mSmallModelsAvailable);
     mModelMenu.CheckItem(mOwner.mModelVariant == "small-music" ? 1 : 0, true);
     GetUI()->CreatePopupMenu(*this, mModelMenu, mModelMenuRect);
+  }
+
+  void OpenDownloadMenu()
+  {
+    if (!GetUI())
+      return;
+    mModelMenu.Clear();
+    mModelMenu.AddItem("download medium (~5.7 GB)");
+    mModelMenu.AddItem("download small-music (~2.3 GB)");
+    mDownloadMenuOpen = true;
+    GetUI()->CreatePopupMenu(*this, mModelMenu, mModelDownloadRect);
   }
 
   void DrawDecoder(IGraphics& g, const IRECT& card)
@@ -832,7 +865,7 @@ private:
 
   void ClearHitRects()
   {
-    mModelMenuRect = mModelsFolderRect = mResidencyToggleRect = {};
+    mModelMenuRect = mModelsFolderRect = mModelDownloadRect = mResidencyToggleRect = {};
     mDecoderToggleRect = mDecoderDownloadRect = mDecoderChooseRect = mDecoderClearRect = {};
     mNormalizeToggleRect = mLimiterToggleRect = {};
     mPeakRect = mCeilingRect = mKneeRect = {};
@@ -842,7 +875,8 @@ private:
   SA3ReaperExtension& mOwner;
   Slider mSlider = Slider::None;
   IPopupMenu mModelMenu;
-  IRECT mModelMenuRect, mModelsFolderRect, mResidencyToggleRect;
+  bool mDownloadMenuOpen = false;
+  IRECT mModelMenuRect, mModelsFolderRect, mModelDownloadRect, mResidencyToggleRect;
   IRECT mDecoderToggleRect, mDecoderDownloadRect, mDecoderChooseRect, mDecoderClearRect;
   IRECT mNormalizeToggleRect, mLimiterToggleRect;
   IRECT mPeakRect, mCeilingRect, mKneeRect, mDefaultsRect, mRawRect;
@@ -1170,6 +1204,7 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
 SA3ReaperExtension::~SA3ReaperExtension()
 {
   mRenderService.Cancel();
+  StopModelDownload();
   StopDecoderLoraDownload();
 }
 
@@ -1185,6 +1220,16 @@ void SA3ReaperExtension::OnIdle()
     mRenderService.ReleaseModels();
   ContinuePendingPeakBuilds();
 
+  const bool modelsWereReady = ModelsReady();
+  const uint64_t modelDownloadRevision = mModelDownloadRevision.load(std::memory_order_acquire);
+  const bool modelDownloadFinished = modelDownloadRevision != mSeenModelDownloadRevision;
+  if (modelDownloadFinished)
+  {
+    mSeenModelDownloadRevision = modelDownloadRevision;
+    mSettingsNotice = mPanelStatus = ModelDownloadStatus();
+    ReloadSharedSettings();
+  }
+
   const uint64_t decoderRevision = mDecoderDownloadRevision.load(std::memory_order_acquire);
   const bool decoderFinished = decoderRevision != mSeenDecoderDownloadRevision;
   if (decoderFinished)
@@ -1199,8 +1244,10 @@ void SA3ReaperExtension::OnIdle()
     ReloadSharedSettings(false);
   }
 
-  RefreshPanel(completed || decoderFinished || mRenderService.Busy()
-               || mDecoderDownloadBusy.load(std::memory_order_acquire));
+  RefreshPanel(completed || decoderFinished || modelDownloadFinished || mRenderService.Busy()
+               || mDecoderDownloadBusy.load(std::memory_order_acquire)
+               || mModelDownloadBusy.load(std::memory_order_acquire)
+               || ModelsReady() != modelsWereReady);
   UpdateLanePlayhead();
 }
 
@@ -1278,7 +1325,7 @@ void SA3ReaperExtension::ApplyResponsiveLayout(IGraphics* graphics)
   place(kCtrlTagRun, lanesPage ? IRECT(main.L, main.B - 32.f, main.R, main.B)
                                : IRECT(main.L, listBottom + 6.f, main.R, listBottom + 38.f),
         showMain || lanesPage);
-  place(kCtrlTagHint, IRECT(main.L, std::max(listBottom + 44.f, main.B - 42.f), main.R, main.B), showMain);
+  place(kCtrlTagHint, IRECT(main.L, listBottom + 44.f, main.R, main.B), showMain);
   place(kCtrlTagSettings, side, showSettings);
   place(kCtrlTagAutomation, lanesPage ? IRECT(side.L, main.T + 86.f, side.R, options.T - 6.f) : side, showLanes);
 
@@ -1397,6 +1444,11 @@ bool SA3ReaperExtension::LaneMissing(const std::string& path) const
 {
   return std::none_of(mCreativeLoras.begin(), mCreativeLoras.end(),
                       [&](const CreativeLora& lora) { return lora.path == path; });
+}
+
+bool SA3ReaperExtension::ModelsReady() const
+{
+  return mModelVariant == "medium" ? mMediumModelsAvailable : mSmallModelsAvailable;
 }
 
 void SA3ReaperExtension::ReloadSharedSettings(bool scanModels)
@@ -1534,6 +1586,73 @@ void SA3ReaperExtension::ClearDecoderLora()
   RefreshPanel(true);
 }
 
+void SA3ReaperExtension::StartModelDownload(const std::string& variant)
+{
+  IGraphics* ui = GetUI();
+  if (!ui || mModelDownloadBusy.load(std::memory_order_acquire))
+    return;
+  if (mRenderService.Busy() || mDecoderDownloadBusy.load(std::memory_order_acquire))
+  {
+    mSettingsNotice = "Finish or cancel the current generation or download first.";
+    RefreshPanel(true);
+    return;
+  }
+
+  WDL_String directory;
+  const std::string seed = gary::DefaultModelsDirectory();
+  if (!seed.empty())
+    directory.Set(seed.c_str());
+  ui->PromptForDirectory(directory);
+  if (directory.GetLength() == 0)
+    return;
+  const std::string destination = directory.Get();
+
+  if (mModelDownloadWorker.joinable())
+    mModelDownloadWorker.join();
+  mModelDownloadCancel.store(false, std::memory_order_release);
+  mModelDownloadBusy.store(true, std::memory_order_release);
+  SetModelDownloadStatus("starting " + variant + " download");
+  mModelDownloadWorker = std::thread([this, destination, variant]() {
+    const gary::ModelDownloadResult result = gary::DownloadModelSet(destination, variant, mModelDownloadCancel,
+      [this](const std::string& status, float) { SetModelDownloadStatus(status); });
+    if (result.complete)
+    {
+      gary::SaveSetting("models_dir", destination);
+      gary::SaveSetting("variant", variant);
+    }
+    SetModelDownloadStatus(result.message);
+    mModelDownloadBusy.store(false, std::memory_order_release);
+    mModelDownloadRevision.fetch_add(1, std::memory_order_acq_rel);
+  });
+  RefreshPanel(true);
+}
+
+void SA3ReaperExtension::CancelModelDownload()
+{
+  mModelDownloadCancel.store(true, std::memory_order_release);
+  SetModelDownloadStatus("cancelling download");
+}
+
+void SA3ReaperExtension::StopModelDownload()
+{
+  mModelDownloadCancel.store(true, std::memory_order_release);
+  if (mModelDownloadWorker.joinable())
+    mModelDownloadWorker.join();
+  mModelDownloadBusy.store(false, std::memory_order_release);
+}
+
+void SA3ReaperExtension::SetModelDownloadStatus(const std::string& status)
+{
+  std::lock_guard<std::mutex> lock(mModelDownloadStatusMutex);
+  mModelDownloadStatus = status;
+}
+
+std::string SA3ReaperExtension::ModelDownloadStatus() const
+{
+  std::lock_guard<std::mutex> lock(mModelDownloadStatusMutex);
+  return mModelDownloadStatus;
+}
+
 void SA3ReaperExtension::StartOrCancelDecoderLoraDownload()
 {
   if (mDecoderDownloadBusy.load(std::memory_order_acquire))
@@ -1542,9 +1661,9 @@ void SA3ReaperExtension::StartOrCancelDecoderLoraDownload()
     SetDecoderDownloadStatus("cancelling decoder correction download");
     return;
   }
-  if (mRenderService.Busy())
+  if (mRenderService.Busy() || mModelDownloadBusy.load(std::memory_order_acquire))
   {
-    mSettingsNotice = "Finish or cancel the current generation before downloading.";
+    mSettingsNotice = "Finish or cancel the current generation or download first.";
     RefreshPanel(true);
     return;
   }
@@ -2165,6 +2284,13 @@ void SA3ReaperExtension::StartOrCancelRender()
   if (mRenderService.Busy())
   {
     mRenderService.Cancel();
+    RefreshPanel(true);
+    return;
+  }
+
+  if (mModelDownloadBusy.load(std::memory_order_acquire))
+  {
+    mPanelStatus = "Finish or cancel the model download first.";
     RefreshPanel(true);
     return;
   }
@@ -2825,6 +2951,10 @@ void SA3ReaperExtension::RefreshPanel(bool force)
                   mRenderService.Status().c_str(), mRenderService.Progress() * 100.f);
     statusText = progress;
   }
+  else if (mModelDownloadBusy.load(std::memory_order_acquire))
+    statusText = ModelDownloadStatus();
+  else if (!ModelsReady())
+    statusText = "No " + mModelVariant + " models found. Open settings to download them or choose your models folder.";
   else
     statusText = mPanelStatus;
 
@@ -2884,6 +3014,8 @@ void SA3ReaperExtension::RefreshPanel(bool force)
                               && sourceLength + continuationSeconds <= 300.0);
       }
     }
+    if (!mRenderService.Busy() && (!ModelsReady() || mModelDownloadBusy.load(std::memory_order_acquire)))
+      runButton->SetEnabled(false);
   }
 }
 

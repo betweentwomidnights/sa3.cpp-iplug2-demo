@@ -455,7 +455,7 @@ bool ValidateRenderRequest(const SA3RenderRequest& request, std::string& error)
   }
   if (request.modelsDir.empty())
   {
-    error = "no models folder is configured; configure models in the VST3 settings first";
+    error = "no models folder is configured; choose one first";
     return false;
   }
 
