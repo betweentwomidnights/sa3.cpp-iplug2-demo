@@ -1,6 +1,8 @@
 #pragma once
 
 #include "DemoAudioFileStore.h"
+#include "SA3LaneModel.h"
+#include "SA3PromptOptions.h"
 #include "libsa3_v1.h"
 
 #include <atomic>
@@ -19,6 +21,15 @@ struct SA3LoraSetting
   float strength = 1.f;
 };
 
+// One automation lane as libsa3 reads it. envelope holds (seconds, amount) pairs on the output
+// timeline, where amount is the LoRA's strength, and an empty prompt uses the request's.
+struct SA3LaneSetting
+{
+  std::string loraPath;
+  std::string prompt;
+  std::vector<float> envelope;
+};
+
 enum class SA3RenderOperation
 {
   Generate,
@@ -33,6 +44,8 @@ struct SA3RenderRequest
   // Generate: output duration. Continue: additional duration. Transform follows sourceAudio.
   double durationSeconds = 30.0;
   double bpm = 120.0;
+  float generationTailSeconds = kSA3EndsHereTailSeconds;
+  float continuationTailSeconds = kSA3KeepsGoingTailSeconds;
   int steps = 8;
   float cfgScale = 1.f;
   float initNoiseLevel = 0.5f;
@@ -42,6 +55,10 @@ struct SA3RenderRequest
   std::string variant = "medium";
   RecordingSnapshot sourceAudio;
   std::vector<SA3LoraSetting> loras;
+  std::vector<SA3LaneSetting> lanes;
+  float laneIsolation = 1.f;
+  float laneIsolationUntil = 0.f;
+  float laneAverageUntil = 0.9f;
   bool peakNormalize = true;
   float peakNormalizeDb = 2.f;
   bool limiter = true;
@@ -64,6 +81,28 @@ SA3RenderRequest LoadSharedRenderRequest(std::string prompt,
                                          double bpm,
                                          SA3RenderOperation operation = SA3RenderOperation::Generate);
 bool ValidateRenderRequest(const SA3RenderRequest& request, std::string& error);
+// Appends the tempo, replacing one a prompt already carries, so every prompt agrees on the grid.
+std::string PromptWithTempo(std::string prompt, double bpm);
+// False only when libsa3 can read the file and says a lane can't run it.
+bool AdapterSupportsLanes(const std::string& path);
+
+// A LoRA in the host's list, as the lanes see it.
+struct SA3LaneSource
+{
+  std::string name;
+  std::string path;
+  float strength = 0.f;
+};
+
+// Gives every LoRA a lane, in list order. Curves survive automation being switched off, so turning
+// it back on returns them as they were. Returns the name of a LoRA that can't run in a lane, if any.
+std::string SyncLanes(std::vector<SA3Lane>& lanes, const std::vector<SA3LaneSource>& sources);
+// timelineStartSeconds places the curves on the output, which starts with the source for Continue.
+void AddLanesToRequest(SA3RenderRequest& request, const std::vector<SA3Lane>& lanes, SA3LaneBlend blend,
+                       const std::vector<SA3LaneSource>& sources, double promptBpm, const std::string& keyScale,
+                       double timelineStartSeconds, double timelineSeconds);
+// Min/max pairs across the audio from startSeconds on, for the automation strip.
+std::vector<float> WaveformPeaks(const RecordingSnapshot& audio, double startSeconds, size_t columns = 512);
 
 class SA3RenderService
 {

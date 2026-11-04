@@ -271,7 +271,7 @@ Copy-Item -LiteralPath .\build\out\SA3IPlug2Demo.vst3 -Destination $userVst3 -Re
 The current validated metadata is:
 
 - vendor: `the collabage patch`
-- version: `0.4.0`
+- version: `0.5.0`
 - VST3 validator: `47 tests passed, 0 tests failed`
 
 ## Playback crackle triage

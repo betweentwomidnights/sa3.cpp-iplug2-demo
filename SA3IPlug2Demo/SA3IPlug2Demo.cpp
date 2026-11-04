@@ -1,7 +1,10 @@
 #include "SA3IPlug2Demo.h"
 #include "DemoUIPrimitives.h"
+#include "SA3LaneEditor.h"
+#include "SA3PromptOptions.h"
 #include "IPlug_include_in_plug_src.h"
 #include "IControls.h"
+#include "ITextEntryControl.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -11,10 +14,6 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <commdlg.h>
-#endif
-#ifdef __APPLE__
-#include <dlfcn.h>
 #endif
 
 #include <algorithm>
@@ -39,8 +38,10 @@ namespace
 {
 constexpr const char* kDemoFont = gary::ui::FontName;
 constexpr int kCtrlTagMain = 1000;
+constexpr int kCtrlTagLanes = 1001;
+constexpr int kCtrlTagPanel = 1002;
 constexpr uint32_t kPluginStateMagic = 0x53334133u; // "SA3" state chunk
-constexpr uint32_t kPluginStateVersion = 1u;
+constexpr uint32_t kPluginStateVersion = 3u;   // 2 added the ending choices and automation lanes, 3 lane snap
 constexpr int kMaxPersistedLoras = 64;
 
 std::string CompactText(std::string text, size_t maxChars)
@@ -56,11 +57,6 @@ size_t FitChars(float width, float approxCharWidth, size_t minChars, size_t maxC
 {
   const size_t fitted = static_cast<size_t>(std::max(1.f, width / std::max(1.f, approxCharWidth)));
   return std::clamp(fitted, minChars, maxChars);
-}
-
-int64_t RequestableSeed(uint64_t seed) noexcept
-{
-  return static_cast<int64_t>(seed & static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
 }
 
 int64_t ParseSeedText(const char* text, int64_t fallback) noexcept
@@ -129,214 +125,6 @@ std::string FormatBytes(uint64_t bytes)
   return text;
 }
 
-std::vector<float> ToPlanar(const gary::RecordingSnapshot& snapshot)
-{
-  std::vector<float> out((size_t)snapshot.numSamples * snapshot.channels.size(), 0.f);
-  for (size_t c = 0; c < snapshot.channels.size(); ++c)
-  {
-    const auto& src = snapshot.channels[c];
-    const int n = std::min(snapshot.numSamples, static_cast<int>(src.size()));
-    if (n > 0)
-      std::copy(src.begin(), src.begin() + n, out.begin() + (ptrdiff_t)c * snapshot.numSamples);
-  }
-  return out;
-}
-
-struct Sa3Api
-{
-  using GetApiFn = const sa3_api_v1* (SA3_CALL *)(uint32_t);
-
-#ifdef _WIN32
-  HMODULE module = nullptr;
-#elif defined(__APPLE__)
-  void* module = nullptr;
-#endif
-  const sa3_api_v1* api = nullptr;
-
-  bool Ready() const noexcept
-  {
-#ifdef _WIN32
-    return module && api;
-#elif defined(__APPLE__)
-    return module && api;
-#else
-    return false;
-#endif
-  }
-
-  bool Load(std::string& error)
-  {
-    if (Ready())
-      return true;
-
-#ifdef _WIN32
-    const std::wstring dir = ModuleDirectory(error);
-    if (dir.empty())
-      return false;
-
-    const std::wstring dllPath = dir + L"\\sa3.dll";
-    module = LoadLibraryExW(dllPath.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if (!module)
-    {
-      error = "LoadLibraryExW failed for " + WideToUtf8(dllPath) + " (win32 " + std::to_string(GetLastError()) + ")";
-      return false;
-    }
-
-    GetApiFn getApi = nullptr;
-    if (!Resolve(getApi, "sa3_get_api", error)) return false;
-    api = getApi(SA3_ABI_VERSION_1);
-    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < SA3_API_V1_MIN_SIZE)
-    {
-      error = "libsa3 does not provide the complete C ABI V1 table";
-      return false;
-    }
-    return true;
-#elif defined(__APPLE__)
-    const std::string dir = ModuleDirectory(error);
-    if (dir.empty())
-      return false;
-
-    const std::string dylibPath = dir + "/libsa3.dylib";
-    module = dlopen(dylibPath.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (!module)
-    {
-      const char* detail = dlerror();
-      error = "dlopen failed for " + dylibPath + (detail ? std::string(": ") + detail : std::string());
-      return false;
-    }
-
-    GetApiFn getApi = nullptr;
-    if (!Resolve(getApi, "sa3_get_api", error)) return false;
-    api = getApi(SA3_ABI_VERSION_1);
-    if (!api || api->abi_version != SA3_ABI_VERSION_1 || api->size < SA3_API_V1_MIN_SIZE)
-    {
-      error = "libsa3 does not provide the complete C ABI V1 table";
-      return false;
-    }
-    return true;
-#else
-    error = "runtime libsa3 loading is only implemented for Windows/macOS in this demo";
-    return false;
-#endif
-  }
-
-private:
-#ifdef _WIN32
-  static std::string WideToUtf8(const std::wstring& text)
-  {
-    if (text.empty())
-      return {};
-    const int required = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (required <= 1)
-      return {};
-    std::string out((size_t)required - 1, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, out.data(), required, nullptr, nullptr);
-    return out;
-  }
-
-  static std::wstring ModuleDirectory(std::string& error)
-  {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&ModuleDirectory), &self))
-    {
-      error = "GetModuleHandleExW failed (win32 " + std::to_string(GetLastError()) + ")";
-      return {};
-    }
-
-    std::vector<wchar_t> buffer(1024);
-    for (;;)
-    {
-      const DWORD length = GetModuleFileNameW(self, buffer.data(), (DWORD)buffer.size());
-      if (length == 0)
-      {
-        error = "GetModuleFileNameW failed (win32 " + std::to_string(GetLastError()) + ")";
-        return {};
-      }
-      if (length < buffer.size() - 1)
-      {
-        std::wstring path(buffer.data(), length);
-        const size_t slash = path.find_last_of(L"\\/");
-        if (slash == std::wstring::npos)
-        {
-          error = "could not derive module directory from " + WideToUtf8(path);
-          return {};
-        }
-        return path.substr(0, slash);
-      }
-      buffer.resize(buffer.size() * 2);
-    }
-  }
-
-  template <typename Fn>
-  bool Resolve(Fn& fn, const char* name, std::string& error)
-  {
-    FARPROC proc = GetProcAddress(module, name);
-    if (!proc)
-    {
-      error = std::string("GetProcAddress failed for ") + name + " (win32 " + std::to_string(GetLastError()) + ")";
-      return false;
-    }
-    fn = reinterpret_cast<Fn>(proc);
-    return true;
-  }
-#elif defined(__APPLE__)
-  static std::string ModuleDirectory(std::string& error)
-  {
-    Dl_info info = {};
-    if (dladdr(reinterpret_cast<const void*>(&ModuleDirectory), &info) == 0 || !info.dli_fname)
-    {
-      error = "dladdr failed while resolving module directory";
-      return {};
-    }
-
-    std::string path(info.dli_fname);
-    const size_t slash = path.find_last_of('/');
-    if (slash == std::string::npos)
-    {
-      error = "could not derive module directory from " + path;
-      return {};
-    }
-    return path.substr(0, slash);
-  }
-
-  template <typename Fn>
-  bool Resolve(Fn& fn, const char* name, std::string& error)
-  {
-    dlerror();
-    void* proc = dlsym(module, name);
-    if (!proc)
-    {
-      const char* detail = dlerror();
-      error = std::string("dlsym failed for ") + name + (detail ? std::string(": ") + detail : std::string());
-      return false;
-    }
-    fn = reinterpret_cast<Fn>(proc);
-    return true;
-  }
-#endif
-};
-
-Sa3Api& SharedSa3Api()
-{
-  static Sa3Api api;
-  return api;
-}
-
-const Sa3Api* LoadSa3Api(std::string& error)
-{
-  static std::mutex mutex;
-  std::lock_guard<std::mutex> lock(mutex);
-  Sa3Api& api = SharedSa3Api();
-  return api.Load(error) ? &api : nullptr;
-}
-
-const Sa3Api* LoadedSa3Api()
-{
-  const Sa3Api& api = SharedSa3Api();
-  return api.Ready() ? &api : nullptr;
-}
-
 class SA3DemoControl final : public IControl
 {
   enum class Hit
@@ -369,18 +157,20 @@ class SA3DemoControl final : public IControl
     NoiseSlider,
     SeedToggle,
     SeedField,
-    BpmToggle,
     BpmValue,
     KeyRoot,
     KeyMode,
     DistShift,
     LoopToggle,
     LoopBars,
+    EndsHere,
+    KeepsGoing,
     Run,
     AddLora,
-    LoraToggle,
+    Automation,
     LoraRemove,
     LoraSlider,
+    LoraScroll,
     OutputPlay,
     OutputStop,
     SaveBuffer
@@ -394,6 +184,7 @@ class SA3DemoControl final : public IControl
     Cfg,
     Noise,
     Lora,
+    LoraScroll,
     Bpm,
     PeakDb,
     LimiterCeiling,
@@ -500,7 +291,9 @@ public:
     y += 56.f;
 
     y = DrawModeControls(g, IRECT(left, y, right, y + 104.f), mode) + 8.f;
-    const float loraPanelHeight = mPlugin.Loras().empty() ? 76.f : 108.f;
+    const size_t loraCount = mPlugin.Loras().size();
+    const float loraPanelHeight = loraCount == 0 ? 76.f
+      : 44.f + kLoraRowPitch * static_cast<float>(std::clamp(loraCount, size_t(2), kLoraRowsShown));
     y = DrawLoraPanel(g, IRECT(left, y, right, y + loraPanelHeight)) + 8.f;
 
     mRunRect = IRECT(left, y, left + 180.f, y + 32.f);
@@ -541,13 +334,7 @@ public:
         {
           mEditTarget = EditTarget::Prompt;
           mEditPromptMode = mode;
-          const IText promptEntryText = IText(14.f, COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle)
-                                          .WithTEColors(gary::ui::PanelDark(), COLOR_WHITE);
-          GetUI()->CreateTextEntry(*this,
-                                   promptEntryText,
-                                   mPromptRect,
-                                   mPlugin.PromptForMode(mode).c_str(),
-                                   0);
+          gary::ui::OpenPromptEntry(*this, mPromptRect, mPlugin.PromptForMode(mode).c_str(), 13.f);
         }
         return;
       }
@@ -589,7 +376,6 @@ public:
           GetUI()->CreateTextEntry(*this, seedEntryText, mSeedFieldRect, seedText.c_str(), 0);
         }
         return;
-      case Hit::BpmToggle:      mPlugin.ToggleAppendBpm(); SetDirty(false); return;
       case Hit::BpmValue:       mActiveSlider = Slider::Bpm; return;   // vertical drag adjusts (see OnMouseDrag)
       case Hit::KeyRoot:        OpenKeyRootMenu(); return;
       case Hit::KeyMode:        OpenKeyModeMenu(); return;
@@ -605,13 +391,19 @@ public:
         SetDirty(false);
         return;
       }
-      case Hit::LoraSlider:     mActiveSlider = Slider::Lora; mActiveLoraIndex = hit.index; UpdateSliderFromX(x); return;
+      case Hit::EndsHere:
+      case Hit::KeepsGoing:
+        mPlugin.SetEndingKeepsGoing(mPlugin.CurrentRenderMode(), hit.hit == Hit::KeepsGoing);
+        SetDirty(false);
+        return;
+      case Hit::LoraSlider:     mActiveSlider = Slider::Lora; mActiveLoraRow = hit.index; UpdateSliderFromX(x); return;
+      case Hit::LoraScroll:     mActiveSlider = Slider::LoraScroll; ScrollLorasTo(y); return;
       case Hit::PeakDbSlider: mActiveSlider = Slider::PeakDb; UpdateSliderFromX(x); return;
       case Hit::LimiterCeilingSlider: mActiveSlider = Slider::LimiterCeiling; UpdateSliderFromX(x); return;
       case Hit::LimiterKneeSlider: mActiveSlider = Slider::LimiterKnee; UpdateSliderFromX(x); return;
-      case Hit::LoraToggle:     ToggleLora(hit.index); SetDirty(false); return;
-      case Hit::LoraRemove:     mPlugin.RemoveLora(hit.index); SetDirty(false); return;
+      case Hit::LoraRemove:     mPlugin.RemoveLora(mFirstLora + hit.index); SetDirty(false); return;
       case Hit::AddLora:        mPlugin.ImportLoraFromDialog(); SetDirty(false); return;
+      case Hit::Automation:     mPlugin.ToggleAutomation(); SetDirty(false); return;
       case Hit::Run:
         if (mPlugin.Busy()) mPlugin.CancelRender();
         else if (mPlugin.CanRender(mPlugin.CurrentRenderMode())) mPlugin.StartRender(mPlugin.CurrentRenderMode());
@@ -639,6 +431,11 @@ public:
     {
       mPlugin.AdjustBpm((double)(-dY) * 0.4);   // drag up = faster; ~2.5px per bpm, deliberate not twitchy
       SetDirty(false);
+      return;
+    }
+    if (mActiveSlider == Slider::LoraScroll)
+    {
+      ScrollLorasTo(y);
       return;
     }
     if (mActiveSlider != Slider::None)
@@ -711,6 +508,18 @@ public:
     IControl::OnMouseOut();
   }
 
+  void OnMouseWheel(float x, float y, const IMouseMod&, float d) override
+  {
+    if (mSettingsOpen || !mLoraListRect.Contains(x, y))
+      return;
+    const size_t total = mPlugin.Loras().size();
+    if (d < 0.f && mFirstLora + kLoraRowsShown < total)
+      ++mFirstLora;
+    else if (d > 0.f && mFirstLora > 0)
+      --mFirstLora;
+    SetDirty(false);
+  }
+
   void OnDrop(const char* str) override
   {
     mPlugin.LoadDroppedAudioFile(str);
@@ -778,6 +587,9 @@ public:
   }
 
 private:
+  static constexpr float kLoraRowPitch = 26.f;
+  static constexpr size_t kLoraRowsShown = 5;
+
   static const char* ActionLabel(SA3IPlug2Demo::RenderMode mode)
   {
     switch (mode)
@@ -822,7 +634,6 @@ private:
     if (mNoiseSliderRect.Contains(x, y)) return {Hit::NoiseSlider, 0};
     if (mSeedToggleRect.Contains(x, y)) return {Hit::SeedToggle, 0};
     if (mSeedFieldRect.Contains(x, y)) return {Hit::SeedField, 0};
-    if (mBpmToggleRect.Contains(x, y)) return {Hit::BpmToggle, 0};
     if (mBpmValueRect.Contains(x, y)) return {Hit::BpmValue, 0};
     if (mKeyRootRect.Contains(x, y)) return {Hit::KeyRoot, 0};
     if (mKeyModeRect.Contains(x, y)) return {Hit::KeyMode, 0};
@@ -830,13 +641,15 @@ private:
     if (mLoopToggleRect.Contains(x, y)) return {Hit::LoopToggle, 0};
     for (size_t i = 0; i < mBarsRects.size(); ++i)
       if (mBarsRects[i].Contains(x, y)) return {Hit::LoopBars, i};
+    if (mEndsHereRect.Contains(x, y)) return {Hit::EndsHere, 0};
+    if (mKeepsGoingRect.Contains(x, y)) return {Hit::KeepsGoing, 0};
+    if (mLoraScrollRect.Contains(x, y)) return {Hit::LoraScroll, 0};
     for (size_t i = 0; i < mLoraSliderRects.size(); ++i)
       if (mLoraSliderRects[i].Contains(x, y)) return {Hit::LoraSlider, i};
-    for (size_t i = 0; i < mLoraToggleRects.size(); ++i)
-      if (mLoraToggleRects[i].Contains(x, y)) return {Hit::LoraToggle, i};
     for (size_t i = 0; i < mLoraRemoveRects.size(); ++i)
       if (mLoraRemoveRects[i].Contains(x, y)) return {Hit::LoraRemove, i};
     if (mAddLoraRect.Contains(x, y)) return {Hit::AddLora, 0};
+    if (mAutomationRect.Contains(x, y)) return {Hit::Automation, 0};
     if (mRunRect.Contains(x, y)) return {Hit::Run, 0};
     if (mSaveBufferRect.Contains(x, y)) return {Hit::SaveBuffer, 0};
     if (mOutputPlayRect.Contains(x, y)) return {Hit::OutputPlay, 0};
@@ -909,8 +722,8 @@ private:
     const std::string prompt = mPlugin.PromptForMode(mode);
     const bool empty = prompt.empty();
     const std::string shown = empty ? std::string("type a prompt ...or don't. that's cool too") : prompt;
-    g.DrawText(IText(13.f, empty ? TextDim() : COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle),
-               CompactText(shown, FitChars(mPromptRect.W() - 16.f, 6.0f, 14, 160)).c_str(), mPromptRect.GetPadded(-8.f));
+    const IText promptText(13.f, empty ? TextDim() : COLOR_WHITE, kDemoFont, EAlign::Near, EVAlign::Middle);
+    g.DrawText(promptText, FitText(g, promptText, shown, mPromptRect.W() - 16.f).c_str(), mPromptRect.GetPadded(-8.f));
   }
 
   float SliderFraction(float value, float minValue, float maxValue) const
@@ -1060,13 +873,14 @@ private:
     mNoiseSliderRect = {};
     mSeedToggleRect = {};
     mSeedFieldRect = {};
-    mBpmToggleRect = {};
     mBpmValueRect = {};
     mKeyRootRect = {};
     mKeyModeRect = {};
     mDistShiftRect = {};
     mLoopToggleRect = {};
     mBarsRects = {};
+    mEndsHereRect = {};
+    mKeepsGoingRect = {};
     float y = bounds.T;
 
     char value[32] = {};
@@ -1157,21 +971,16 @@ private:
   void DrawMusicalControls(IGraphics& g, const IRECT& bounds)
   {
     using namespace gary::ui;
-    // bpm-append toggle + live host tempo
+    // live host tempo
     g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
                "bpm", IRECT(bounds.L, bounds.T, bounds.L + 30.f, bounds.B));
-    mBpmToggleRect = IRECT(bounds.L + 34.f, bounds.MH() - 8.f, bounds.L + 50.f, bounds.MH() + 8.f);
-    const bool bpmOn = mPlugin.AppendBpm();
-    g.DrawRoundRect(bpmOn ? Red() : Frame(), mBpmToggleRect, 2.f);
-    if (bpmOn)
-      g.FillRoundRect(Red(), mBpmToggleRect.GetPadded(-4.f), 1.f);
     // draggable bpm value (vertical drag adjusts; follows host tempo until dragged)
-    mBpmValueRect = IRECT(mBpmToggleRect.R + 6.f, bounds.T + 2.f, bounds.L + 116.f, bounds.B - 2.f);
+    mBpmValueRect = IRECT(bounds.L + 34.f, bounds.T + 2.f, bounds.L + 94.f, bounds.B - 2.f);
     g.FillRoundRect(ButtonFill(), mBpmValueRect, 3.f);
     g.DrawRoundRect(mPlugin.BpmOverridden() ? Frame() : FrameSoft(), mBpmValueRect, 3.f);
     char bpmText[24] = {};
     std::snprintf(bpmText, sizeof bpmText, "%d", (int)std::llround(mPlugin.Bpm()));
-    g.DrawText(IText(12.f, bpmOn ? COLOR_WHITE : TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle),
+    g.DrawText(IText(12.f, COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle),
                bpmText, mBpmValueRect);
 
     // key root (dropdown) + major/minor (click toggle)
@@ -1179,9 +988,8 @@ private:
                "key", IRECT(bounds.L + 118.f, bounds.T, bounds.R - 150.f, bounds.B));
     mKeyRootRect = IRECT(bounds.R - 144.f, bounds.T + 1.f, bounds.R - 78.f, bounds.B - 1.f);
     mKeyModeRect = {};
-    static const char* kRoots[13] = {"none", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     const int root = std::clamp(mPlugin.KeyRoot(), 0, 12);
-    DrawDropButton(g, mKeyRootRect, kRoots[root]);
+    DrawDropButton(g, mKeyRootRect, gary::kSA3KeyRootNames[root]);
     // major/minor only appears once a root is chosen (nothing is appended when key = none)
     if (root > 0)
     {
@@ -1195,6 +1003,15 @@ private:
     using namespace gary::ui;
     mLoopToggleRect = {};
     mBarsRects = {};
+    mEndsHereRect = {};
+    mKeepsGoingRect = {};
+    if (mode == SA3IPlug2Demo::RenderMode::Continue)
+    {
+      g.DrawText(IText(11.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
+                 "ending", IRECT(bounds.L, bounds.T, bounds.L + 86.f, bounds.B));
+      DrawEndingControls(g, bounds, mode);
+      return;
+    }
     if (mode != SA3IPlug2Demo::RenderMode::Text)
     {
       g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
@@ -1212,10 +1029,10 @@ private:
     g.DrawText(IText(11.f, on ? COLOR_BLACK : COLOR_WHITE, kDemoFont, EAlign::Center, EVAlign::Middle),
                on ? "on" : "off", mLoopToggleRect);
 
+    // A loop has to run to its bar length, so it sets its own headroom instead of an ending.
     if (!on)
     {
-      g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
-                 "generate an exact bar length", IRECT(mLoopToggleRect.R + 10.f, bounds.T, bounds.R, bounds.B));
+      DrawEndingControls(g, bounds, mode);
       return;
     }
 
@@ -1242,13 +1059,24 @@ private:
                hint, IRECT(bx + 4.f, bounds.T, bounds.R, bounds.B));
   }
 
+  void DrawEndingControls(IGraphics& g, const IRECT& bounds, SA3IPlug2Demo::RenderMode mode)
+  {
+    mKeepsGoingRect = IRECT(bounds.R - 76.f, bounds.T + 1.f, bounds.R, bounds.B - 1.f);
+    mEndsHereRect = IRECT(mKeepsGoingRect.L - 74.f, bounds.T + 1.f, mKeepsGoingRect.L - 4.f, bounds.B - 1.f);
+    const bool keepsGoing = mPlugin.EndingKeepsGoing(mode);
+    gary::ui::DrawSegment(g, mEndsHereRect, "ends here", kDemoFont, 11.f, !keepsGoing);
+    gary::ui::DrawSegment(g, mKeepsGoingRect, "keeps going", kDemoFont, 11.f, keepsGoing);
+  }
+
   float DrawLoraPanel(IGraphics& g, const IRECT& bounds)
   {
     using namespace gary::ui;
     mAddLoraRect = {};
-    mLoraToggleRects.clear();
+    mAutomationRect = {};
     mLoraRemoveRects.clear();
     mLoraSliderRects.clear();
+    mLoraListRect = {};
+    mLoraScrollRect = {};
 
     const std::vector<SA3IPlug2Demo::LoraSlot> loras = mPlugin.Loras();
     g.FillRoundRect(PanelDark(), bounds, 4.f);
@@ -1261,6 +1089,8 @@ private:
                "loras", IRECT(left, y, left + 80.f, y + 20.f));
     mAddLoraRect = IRECT(right - 86.f, y, right, y + 22.f);
     DrawButton(g, mAddLoraRect, "add lora", kDemoFont);
+    mAutomationRect = IRECT(mAddLoraRect.L - 96.f, y, mAddLoraRect.L - 8.f, y + 22.f);
+    DrawButton(g, mAutomationRect, "automation", kDemoFont, mPlugin.AutomationOn());
     y += 28.f;
 
     if (loras.empty())
@@ -1270,23 +1100,32 @@ private:
       return bounds.B;
     }
 
-    const size_t rowCount = std::min<size_t>(loras.size(), 2);
+    const size_t total = loras.size();
+    const size_t rowCount = std::min(total, kLoraRowsShown);
+    if (mSeenLoraCount > 0 && total > mSeenLoraCount)   // show the one just added
+      mFirstLora = total - rowCount;
+    mSeenLoraCount = total;
+    mFirstLora = std::min(mFirstLora, total - rowCount);
+    const float rowsHeight = kLoraRowPitch * static_cast<float>(rowCount);
+    mLoraListRect = IRECT(bounds.L, y, bounds.R, y + rowsHeight);
+    const bool scrolls = total > rowCount;
+    if (scrolls)
+      mLoraScrollRect = IRECT(bounds.R - 9.f, y, bounds.R - 4.f, y + rowsHeight - 4.f);
+    const float rowRight = scrolls ? right - 5.f : right;
+
     for (size_t i = 0; i < rowCount; ++i)
     {
-      const auto& lora = loras[i];
-      IRECT row(left, y, right, y + 22.f);
-      IRECT toggle(row.L, row.T + 2.f, row.L + 18.f, row.B - 2.f);
+      const auto& lora = loras[mFirstLora + i];
+      IRECT row(left, y, rowRight, y + 22.f);
       IRECT remove(row.R - 24.f, row.T, row.R, row.B);
       IRECT slider(row.R - 154.f, row.T + 3.f, row.R - 34.f, row.B - 3.f);
-      IRECT label(toggle.R + 6.f, row.T, slider.L - 8.f, row.B);
+      IRECT label(row.L, row.T, slider.L - 8.f, row.B);
 
-      mLoraToggleRects.push_back(toggle);
+      // While a lane is drawing this LoRA the curve sets its strength, so the slider steps aside.
+      const int laneIndex = mPlugin.AutomationOn() ? mPlugin.LaneIndexFor(lora.path) : -1;
       mLoraRemoveRects.push_back(remove);
-      mLoraSliderRects.push_back(slider);
+      mLoraSliderRects.push_back(laneIndex >= 0 ? IRECT() : slider);
 
-      g.DrawRoundRect(lora.enabled ? Red() : Frame(), toggle, 2.f);
-      if (lora.enabled)
-        g.FillRoundRect(Red(), toggle.GetPadded(-4.f), 1.f);
       std::string labelText = lora.name;
       if (!lora.prompts.empty())
         labelText += " (" + std::to_string(lora.prompts.size()) + ")";
@@ -1294,23 +1133,34 @@ private:
                  CompactText(labelText, FitChars(label.W(), 6.f, 10, 42)).c_str(), label);
 
       const IRECT track(slider.L, slider.MH() - 2.f, slider.R, slider.MH() + 2.f);
-      const float filled = slider.L + slider.W() * SliderFraction(lora.strength, 0.f, 2.f);
       g.FillRoundRect(FrameSoft(), track, 2.f);
-      g.FillRoundRect(Red(), IRECT(track.L, track.T, filled, track.B), 2.f);
-      g.FillCircle(COLOR_WHITE, filled, slider.MH(), 5.f);
+      if (laneIndex >= 0)
+      {
+        g.DrawText(IText(10.f, SA3LaneEditorControl::LaneColor(laneIndex), kDemoFont, EAlign::Center, EVAlign::Middle),
+                   "lane", IRECT(slider.L, row.B - 2.f, slider.R, row.B + 12.f));
+      }
+      else
+      {
+        const float filled = slider.L + slider.W() * SliderFraction(lora.strength, 0.f, 2.f);
+        g.FillRoundRect(Red(), IRECT(track.L, track.T, filled, track.B), 2.f);
+        g.FillCircle(COLOR_WHITE, filled, slider.MH(), 5.f);
 
-      char value[24] = {};
-      std::snprintf(value, sizeof value, "%.2f", lora.strength);
-      g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle), value, IRECT(slider.L, row.B - 2.f, slider.R, row.B + 12.f));
+        char value[24] = {};
+        std::snprintf(value, sizeof value, "%.2f", lora.strength);
+        g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Center, EVAlign::Middle), value, IRECT(slider.L, row.B - 2.f, slider.R, row.B + 12.f));
+      }
       DrawButton(g, remove, "x", kDemoFont);
-      y += 26.f;
+      y += kLoraRowPitch;
     }
-
-    if (loras.size() > rowCount)
-      g.DrawText(IText(10.f, TextDim(), kDemoFont, EAlign::Near, EVAlign::Middle),
-                 "+ more loras queued", IRECT(left, y, right, y + 14.f));
+    DrawScrollbar(g, mLoraScrollRect, mFirstLora, rowCount, total);
 
     return bounds.B;
+  }
+
+  void ScrollLorasTo(float y)
+  {
+    mFirstLora = gary::ui::ScrollbarFirstAt(mLoraScrollRect, y, kLoraRowsShown, mPlugin.Loras().size());
+    SetDirty(false);
   }
 
   void UpdateSliderFromX(float x)
@@ -1334,8 +1184,8 @@ private:
         mPlugin.SetInitNoiseLevel(0.01f + fraction(mNoiseSliderRect, x) * 0.99f);
         break;
       case Slider::Lora:
-        if (mActiveLoraIndex < mLoraSliderRects.size())
-          mPlugin.SetLoraStrength(mActiveLoraIndex, fraction(mLoraSliderRects[mActiveLoraIndex], x) * 2.f);
+        if (mActiveLoraRow < mLoraSliderRects.size())
+          mPlugin.SetLoraStrength(mFirstLora + mActiveLoraRow, fraction(mLoraSliderRects[mActiveLoraRow], x) * 2.f);
         break;
       case Slider::PeakDb:
         mPlugin.SetPeakNormalizeDb(-6.f + fraction(mPeakDbSliderRect, x) * 12.f);
@@ -1347,27 +1197,20 @@ private:
         mPlugin.SetLimiterKnee(0.1f + fraction(mLimiterKneeSliderRect, x) * 0.9f);
         break;
       case Slider::Bpm:   // handled by vertical drag in OnMouseDrag
+      case Slider::LoraScroll:
       case Slider::None:
         break;
     }
     SetDirty(false);
   }
 
-  void ToggleLora(size_t index)
-  {
-    const auto loras = mPlugin.Loras();
-    if (index < loras.size())
-      mPlugin.SetLoraEnabled(index, !loras[index].enabled);
-  }
-
   void OpenKeyRootMenu()
   {
     if (!GetUI())
       return;
-    static const char* kRoots[13] = {"none", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     mKeyMenu.Clear();
-    for (int i = 0; i < 13; ++i)
-      mKeyMenu.AddItem(kRoots[i]);
+    for (const char* name : gary::kSA3KeyRootNames)
+      mKeyMenu.AddItem(name);
     mKeyMenu.CheckItem(std::clamp(mPlugin.KeyRoot(), 0, 12), true);
     mActivePopup = Popup::KeyRoot;
     GetUI()->CreatePopupMenu(*this, mKeyMenu, mKeyRootRect);
@@ -1572,14 +1415,17 @@ private:
   IRECT mGenerateTabRect, mTransformTabRect, mContinueTabRect;
   IRECT mDurationSliderRect, mStepsSliderRect, mCfgSliderRect, mNoiseSliderRect;
   IRECT mSeedToggleRect, mSeedFieldRect;
-  IRECT mBpmToggleRect, mBpmValueRect, mKeyRootRect, mKeyModeRect;
+  IRECT mBpmValueRect, mKeyRootRect, mKeyModeRect;
   IRECT mDistShiftRect;
   IRECT mLoopToggleRect;
   std::array<IRECT, 4> mBarsRects{};   // 4, 8, 16 (index 3 unused)
-  IRECT mRunRect, mAddLoraRect;
-  std::vector<IRECT> mLoraToggleRects;
+  IRECT mEndsHereRect, mKeepsGoingRect;
+  IRECT mRunRect, mAddLoraRect, mAutomationRect;
   std::vector<IRECT> mLoraRemoveRects;
   std::vector<IRECT> mLoraSliderRects;
+  IRECT mLoraListRect, mLoraScrollRect;
+  size_t mFirstLora = 0;
+  size_t mSeenLoraCount = 0;
   IRECT mSaveBufferRect;
   IRECT mOutputWaveformRect, mOutputPlayRect, mOutputStopRect;
   Slider mActiveSlider = Slider::None;
@@ -1590,7 +1436,7 @@ private:
   std::vector<int> mModelsActions;
   EditTarget mEditTarget = EditTarget::None;
   SA3IPlug2Demo::RenderMode mEditPromptMode = SA3IPlug2Demo::RenderMode::Text;
-  size_t mActiveLoraIndex = 0;
+  size_t mActiveLoraRow = 0;
   bool mOutputPointerDown = false;
   bool mOutputDragStarted = false;
   float mOutputDragStartX = 0.f;
@@ -1646,16 +1492,55 @@ SA3IPlug2Demo::SA3IPlug2Demo(const InstanceInfo& info)
 
 #if IPLUG_EDITOR
   mMakeGraphicsFunc = [&]() {
-    return MakeGraphics(*this, PLUG_WIDTH, PLUG_HEIGHT, PLUG_FPS, GetScaleForScreen(PLUG_WIDTH, PLUG_HEIGHT));
+    return MakeGraphics(*this, WindowWidth(), PLUG_HEIGHT, PLUG_FPS, GetScaleForScreen(WindowWidth(), PLUG_HEIGHT));
   };
 
   mLayoutFunc = [&](IGraphics* pGraphics) {
-    pGraphics->AttachPanelBackground(COLOR_BLACK);
+    pGraphics->AttachControl(new IPanelControl(pGraphics->GetBounds(), COLOR_BLACK), kCtrlTagPanel);
     pGraphics->EnableMouseOver(true);
     pGraphics->AttachTextEntryControl();
     if (!pGraphics->LoadFont(kDemoFont, ROBOTO_FN))
       pGraphics->LoadFont(kDemoFont, "Arial", ETextStyle::Normal);
-    pGraphics->AttachControl(new SA3DemoControl(pGraphics->GetBounds(), *this), kCtrlTagMain);
+    // The main panel keeps its size and place; automation adds a column to its right.
+    pGraphics->AttachControl(new SA3DemoControl(IRECT(0.f, 0.f, PLUG_WIDTH, PLUG_HEIGHT), *this), kCtrlTagMain);
+
+    gary::ui::SA3LaneEditorControl::Host laneHost;
+    laneHost.isMissing = [this](const gary::SA3Lane& lane) {
+      const auto sources = LaneSources();
+      return std::none_of(sources.begin(), sources.end(),
+                          [&lane](const gary::SA3LaneSource& source) { return source.path == lane.path; });
+    };
+    laneHost.resetStrength = [this](const gary::SA3Lane& lane) {
+      for (const auto& source : LaneSources())
+        if (source.path == lane.path)
+          return source.strength;
+      return 0.f;
+    };
+    laneHost.rollPrompt = [this](const gary::SA3Lane& lane) {
+      const auto pool = gary::LoadPromptPoolForLora(lane.path, lane.name);
+      if (pool.empty())
+      {
+        SetStatus("no prompt pool found for " + lane.name);
+        return std::string();
+      }
+      std::random_device randomDevice;
+      std::mt19937 random(randomDevice());
+      std::uniform_int_distribution<size_t> choose(0, pool.size() - 1u);
+      return pool[choose(random)];
+    };
+    laneHost.notify = [this](const std::string& message) { SetStatus(message); };
+    laneHost.changed = [this]() {
+      if (IGraphics* ui = GetUI())
+        if (IControl* control = ui->GetControlWithTag(kCtrlTagMain))
+          control->SetDirty(false);
+    };
+#if defined(APP_API)
+    laneHost.canSnap = false;
+#endif
+    auto* editor = new gary::ui::SA3LaneEditorControl(IRECT(), mLanes, mLaneBlend, mLaneSnap, std::move(laneHost));
+    editor->SetBackdrop(mLaneBackdrop);
+    pGraphics->AttachControl(editor, kCtrlTagLanes);
+    ApplyWindowLayout(pGraphics);
   };
 #endif
 }
@@ -1675,9 +1560,7 @@ SA3IPlug2Demo::~SA3IPlug2Demo()
 {
   if (mCreativeLorasDirty.load(std::memory_order_acquire))
     PersistCreativeLoras();
-  StopWorker();
   StopDownloadWorker();
-  TeardownContext();
 }
 
 #if IPLUG_DSP
@@ -1712,6 +1595,11 @@ void SA3IPlug2Demo::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     if (!mBpmOverride.load(std::memory_order_acquire))   // DAW: follow host tempo unless user dragged it
       mBpm.store(tempo, std::memory_order_release);
   }
+  int beatsPerBar = 0;
+  int beatUnit = 0;
+  GetTimeSig(beatsPerBar, beatUnit);
+  if (beatsPerBar > 0)
+    mBeatsPerBar.store(beatsPerBar, std::memory_order_release);
 
   if (running && !mWasTransportRunning)
     StartAutoRecording();
@@ -1746,17 +1634,100 @@ void SA3IPlug2Demo::OnUIClose()
 
 void SA3IPlug2Demo::OnIdle()
 {
-  if (!KeepModelsResident() && !Busy() && mContext)
+  gary::SA3RenderResult result;
+  if (mRenderService.TakeCompletedResult(result))
   {
-    if (mWorker.joinable())
-      mWorker.join();
-    TeardownContext();
+    FinishRender(std::move(result));
+    // Lane renders are always frugal, so nothing stays resident for the context to hold on to.
+    if (!KeepModelsResident() || mLastRenderUsedLanes)
+      mRenderService.ReleaseModels();
   }
-  if (auto* ui = GetUI())
-    if (auto* control = ui->GetControlWithTag(kCtrlTagMain))
-      control->SetDirty(false);
+  IGraphics* ui = GetUI();
+  if (!ui)
+    return;
+  if (mWindowLayoutPending.exchange(false, std::memory_order_acq_rel))
+    ApplyWindowLayout(ui);
+  if (mAutomationOn)
+    if (auto* control = ui->GetControlWithTag(kCtrlTagLanes))
+    {
+      auto* editor = control->As<gary::ui::SA3LaneEditorControl>();
+      editor->SetTimeline(RenderSeconds(CurrentRenderMode()), Bpm(), mBeatsPerBar.load(std::memory_order_acquire));
+      // The curves start where the last render did, which in Continue is after the source it plays first.
+      const double playhead = OutputPlayheadSeconds();
+      editor->SetPlayhead(playhead < 0.0 ? -1.0 : playhead - mLaneTimelineStart);
+    }
+  if (auto* control = ui->GetControlWithTag(kCtrlTagMain))
+    control->SetDirty(false);
+}
+
+void SA3IPlug2Demo::ApplyWindowLayout(IGraphics* ui)
+{
+  if (!ui)
+    return;
+  if (auto* textEntry = ui->GetTextEntryControl(); textEntry && textEntry->EditInProgress())
+    textEntry->CommitEdit();
+  if (ui->Width() != WindowWidth())
+    ui->Resize(WindowWidth(), PLUG_HEIGHT, ui->GetDrawScale());
+  const IRECT bounds = ui->GetBounds();
+  if (auto* panel = ui->GetControlWithTag(kCtrlTagPanel))
+    panel->SetTargetAndDrawRECTs(bounds);
+  if (auto* lanes = ui->GetControlWithTag(kCtrlTagLanes))
+  {
+    lanes->SetTargetAndDrawRECTs(IRECT(PLUG_WIDTH, 14.f, bounds.R - 14.f, bounds.B - 14.f));
+    lanes->Hide(!mAutomationOn);
+  }
+  ui->SetAllControlsDirty();
 }
 #endif
+
+void SA3IPlug2Demo::ToggleAutomation()
+{
+  mAutomationOn = !mAutomationOn;
+  if (mAutomationOn)
+    SyncLanesToLoras();
+  // Not now: the click that got us here is still being handled, and the window is about to change size.
+  mWindowLayoutPending.store(true, std::memory_order_release);
+}
+
+int SA3IPlug2Demo::LaneIndexFor(const std::string& path) const
+{
+  for (size_t i = 0; i < mLanes.size(); ++i)
+    if (mLanes[i].path == path)
+      return static_cast<int>(i);
+  return -1;
+}
+
+std::vector<gary::SA3LaneSource> SA3IPlug2Demo::LaneSources() const
+{
+  std::lock_guard<std::mutex> lock(mLoraMutex);
+  std::vector<gary::SA3LaneSource> sources;
+  sources.reserve(mLoras.size());
+  for (const auto& lora : mLoras)
+    sources.push_back({lora.name, lora.path, lora.strength});
+  return sources;
+}
+
+void SA3IPlug2Demo::SyncLanesToLoras()
+{
+  const std::string unsupported = gary::SyncLanes(mLanes, LaneSources());
+  if (!unsupported.empty())
+    SetStatus(unsupported + " can't run in a lane, so it stays at its fixed strength");
+#if IPLUG_EDITOR
+  if (IGraphics* ui = GetUI())
+    if (auto* control = ui->GetControlWithTag(kCtrlTagLanes))
+      control->SetDirty(false);
+#endif
+}
+
+void SA3IPlug2Demo::SetLaneBackdrop(const gary::RecordingSnapshot& audio, double startSeconds)
+{
+  mLaneBackdrop = gary::WaveformPeaks(audio, startSeconds);
+#if IPLUG_EDITOR
+  if (IGraphics* ui = GetUI())
+    if (auto* control = ui->GetControlWithTag(kCtrlTagLanes))
+      control->As<gary::ui::SA3LaneEditorControl>()->SetBackdrop(mLaneBackdrop);
+#endif
+}
 
 void SA3IPlug2Demo::SetPrompt(const char* text)
 {
@@ -1777,23 +1748,23 @@ void SA3IPlug2Demo::RollPromptForCurrentMode()
       pool.push_back(prompt);
   };
 
+  // The default prompts, plus the pool of every LoRA in use. With automation on, each lane rolls its
+  // LoRA's prompts with its own dice, so this one stays on the defaults.
+  for (const std::string& prompt : gary::LoadDefaultPromptPool())
+    addUnique(prompt);
+  const size_t defaultCount = pool.size();
+  if (!mAutomationOn)
   {
     std::lock_guard<std::mutex> lock(mLoraMutex);
     for (const auto& lora : mLoras)
     {
-      if (!lora.enabled || lora.strength <= 0.0f)
+      if (lora.strength <= 0.0f)
         continue;
       for (const std::string& prompt : lora.prompts)
         addUnique(prompt);
     }
   }
-
-  const bool usingLoraPrompts = !pool.empty();
-  if (pool.empty())
-  {
-    for (const std::string& prompt : gary::LoadDefaultPromptPool())
-      addUnique(prompt);
-  }
+  const bool usingLoraPrompts = pool.size() > defaultCount;
 
   if (pool.empty())
   {
@@ -1805,7 +1776,7 @@ void SA3IPlug2Demo::RollPromptForCurrentMode()
   std::mt19937 rng(rd());
   std::uniform_int_distribution<size_t> dist(0, pool.size() - 1u);
   SetPromptForMode(CurrentRenderMode(), pool[dist(rng)].c_str());
-  SetStatus(usingLoraPrompts ? "rolled LoRA prompt" : "rolled default prompt");
+  SetStatus(usingLoraPrompts ? "rolled from default + LoRA prompts" : "rolled default prompt");
 }
 
 std::string SA3IPlug2Demo::Prompt() const
@@ -1821,11 +1792,13 @@ std::string SA3IPlug2Demo::PromptForMode(RenderMode mode) const
 
 std::string SA3IPlug2Demo::KeyScaleText() const
 {
-  static const char* kKeyNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
-  const int root = KeyRoot();
-  if (root < 1 || root > 12)
-    return {};
-  return std::string(kKeyNames[root - 1]) + (KeyMode() ? " minor" : " major");
+  return gary::KeyScaleText(KeyRoot(), KeyMode());
+}
+
+void SA3IPlug2Demo::SetEndingKeepsGoing(RenderMode mode, bool keepsGoing)
+{
+  (mode == RenderMode::Continue ? mContinueKeepsGoing : mGenerateKeepsGoing).store(keepsGoing, std::memory_order_release);
+  SetStatus(keepsGoing ? gary::kSA3KeepsGoingHint : gary::kSA3EndsHereHint);
 }
 
 const char* SA3IPlug2Demo::DistShiftName() const
@@ -1836,6 +1809,8 @@ const char* SA3IPlug2Demo::DistShiftName() const
 
 std::string SA3IPlug2Demo::StatusText() const
 {
+  if (mRenderService.Busy())
+    return mRenderService.Status();
   std::lock_guard<std::mutex> lock(mStatusMutex);
   return mStatus;
 }
@@ -1859,9 +1834,8 @@ std::string SA3IPlug2Demo::ModelsDir() const
     if (!mModelsDirSetting.empty())
       return mModelsDirSetting;
   }
-  if (const char* e = std::getenv("SA3_MODELS_DIR"))
-    if (*e) return e;
-  return SA3_DEMO_DEFAULT_MODELS_DIR;
+  const std::string fromEnvironment = gary::EnvironmentPath("SA3_MODELS_DIR");
+  return !fromEnvironment.empty() ? fromEnvironment : std::string(SA3_DEMO_DEFAULT_MODELS_DIR);
 }
 
 std::string SA3IPlug2Demo::ModelVariant() const
@@ -1882,16 +1856,6 @@ void SA3IPlug2Demo::RefreshModelsPresent()
   std::vector<std::string> missing;
   const bool present = gary::ModelSetComplete(dir, variant, "f16", missing);
   mModelsPresent.store(present, std::memory_order_release);
-}
-
-void SA3IPlug2Demo::TeardownContext()
-{
-  if (mContext)
-  {
-    if (const Sa3Api* sa3 = LoadedSa3Api())
-      sa3->api->context_destroy(mContext);
-    mContext = nullptr;
-  }
 }
 
 bool SA3IPlug2Demo::UseModelsFolder(const std::string& dir, const std::string& variant, bool persist)
@@ -1917,9 +1881,7 @@ bool SA3IPlug2Demo::UseModelsFolder(const std::string& dir, const std::string& v
     mModelVariant = v;
   }
   // A previously loaded context may be a different variant/dir — drop it so the next render reloads.
-  // Safe here: this is called from the UI thread and generation is gated off while no models were present.
-  if (!mBusy.load(std::memory_order_acquire))
-    TeardownContext();
+  mRenderService.ReleaseModels();
   mModelsPresent.store(true, std::memory_order_release);
   if (persist)
   {
@@ -1961,8 +1923,7 @@ bool SA3IPlug2Demo::SelectVariant(const std::string& variant)
   }
   if (changed)
   {
-    if (!mBusy.load(std::memory_order_acquire))
-      TeardownContext();   // the loaded context is the old variant — reload on next render
+    mRenderService.ReleaseModels();   // the loaded context is the old variant — reload on next render
     gary::SaveSetting("variant", v);
     LoadPersistedCreativeLoras();
   }
@@ -2050,45 +2011,151 @@ void SA3IPlug2Demo::StartRender(RenderMode mode)
     return;
   }
 
-  if (mBusy.exchange(true, std::memory_order_acq_rel))
+  if (Busy())
   {
     CancelRender();
     return;
   }
 
-  if (mWorker.joinable())
-    mWorker.join();
-
-  mCancelRequested.store(false, std::memory_order_release);
-  RenderInput input = CaptureRenderInput(mode);
-  if (mode != RenderMode::Text && (input.sourceSamples <= 0 || input.sourceChannels.empty()))
+  gary::SA3RenderRequest request = BuildRenderRequest(mode);
+  if (mode != RenderMode::Text && request.sourceAudio.numSamples <= 0)
   {
-    mBusy.store(false, std::memory_order_release);
     SetStatus("drop audio or save a recorded buffer first");
     return;
   }
 
+  mLastRenderUsedLanes = !request.lanes.empty();
+  mLaneTimelineStart = mode == RenderMode::Continue ? SourceSeconds() : 0.0;
+  if (mode == RenderMode::Transform)
+    SetLaneBackdrop(request.sourceAudio, 0.0);
+
   // Do NOT stop output playback here: you can generate while the previous output is auditioning. When the new
-  // output arrives, InstallOutputFromPlanar swaps the buffer and resets the playhead to 0 (keeps playing).
-  mProgress.store(0.f, std::memory_order_release);
-  const uint64_t requestId = mRequestId.fetch_add(1, std::memory_order_acq_rel) + 1;
-  SetStatus(mode == RenderMode::Text ? "queued text generation"
-            : mode == RenderMode::Transform ? "queued transform"
-                                            : "queued continuation");
-  mWorker = std::thread([this, requestId, input = std::move(input)]() mutable {
-    RenderWorkerMain(requestId, std::move(input));
-  });
+  // output arrives, InstallOutput swaps the buffer and resets the playhead to 0 (keeps playing).
+  if (!mRenderService.StartRender(std::move(request)))
+    SetStatus(mRenderService.Status());
 }
 
 void SA3IPlug2Demo::CancelRender()
 {
-  if (!mBusy.load(std::memory_order_acquire))
+  if (!Busy())
     return;
 
-  mCancelRequested.store(true, std::memory_order_release);
-  mRequestId.fetch_add(1, std::memory_order_acq_rel);
+  mRenderService.Cancel();
   mOutputPlaying.store(false, std::memory_order_release);
-  SetStatus("cancelling render");
+}
+
+double SA3IPlug2Demo::SourceSeconds() const
+{
+  std::lock_guard<std::mutex> lock(mSourceMutex);
+  return mInitSamples > 0 ? static_cast<double>(mInitSamples) / std::max(1, mInitSampleRate) : 0.0;
+}
+
+double SA3IPlug2Demo::RenderSeconds(RenderMode mode) const
+{
+  const double duration = mDurationSeconds[(size_t)ModeIndex(mode)].load(std::memory_order_acquire);
+  const double sourceSeconds = SourceSeconds();
+  if (mode == RenderMode::Transform)
+    return sourceSeconds;
+  if (mode == RenderMode::Continue)   // the slider sets the total, and always leaves something to add
+    return std::max(duration, sourceSeconds + 4.0) - sourceSeconds;
+  const int bars = LoopBars();
+  const double bpm = Bpm();
+  return bars > 0 && bpm > 0.0 ? (60.0 / bpm) * 4.0 * bars : duration;   // loops are 4/4
+}
+
+// The frozen snapshot (== myBuffer.wav), not the live scratch, at the stereo libsa3 expects.
+gary::RecordingSnapshot SA3IPlug2Demo::InitSnapshot() const
+{
+  std::lock_guard<std::mutex> lock(mSourceMutex);
+  gary::RecordingSnapshot snapshot;
+  snapshot.numSamples = mInitSamples;
+  snapshot.sampleRate = mInitSampleRate;
+  if (mInitSamples <= 0 || mInitBuffer.empty())
+  {
+    snapshot.numSamples = 0;
+    return snapshot;
+  }
+  snapshot.channels.assign(kPreferredChannels, std::vector<float>((size_t)mInitSamples, 0.f));
+  const int sourceChannels = (int)mInitBuffer.size();
+  for (int c = 0; c < kPreferredChannels; ++c)
+  {
+    const auto& src = mInitBuffer[(size_t)(c % sourceChannels)];
+    const int n = std::min(mInitSamples, (int)src.size());
+    if (n > 0)
+      std::copy(src.begin(), src.begin() + n, snapshot.channels[(size_t)c].begin());
+  }
+  return snapshot;
+}
+
+gary::SA3RenderRequest SA3IPlug2Demo::BuildRenderRequest(RenderMode mode)
+{
+  gary::SA3RenderRequest request;
+  request.operation = mode == RenderMode::Transform ? gary::SA3RenderOperation::Transform
+                    : mode == RenderMode::Continue ? gary::SA3RenderOperation::Continue
+                                                   : gary::SA3RenderOperation::Generate;
+  request.durationSeconds = RenderSeconds(mode);
+  request.steps = Steps();
+  request.cfgScale = CfgScale();
+  request.initNoiseLevel = InitNoiseLevel();
+  request.seed = UseSeed() ? SeedValue() : -1;
+  request.distShift = DistShift();
+  request.modelsDir = ModelsDir();
+  request.variant = ModelVariant();
+  request.peakNormalize = PeakNormalizeEnabled();
+  request.peakNormalizeDb = PeakNormalizeDb();
+  request.limiter = LimiterEnabled();
+  request.limiterCeilingDb = LimiterCeilingDb();
+  request.limiterKnee = LimiterKnee();
+  request.keepModelsResident = KeepModelsResident();
+
+  // A loop runs to its bar length with two seconds of headroom, whatever the ending says.
+  const bool loop = mode == RenderMode::Text && LoopBars() > 0 && Bpm() > 0.0;
+  const float endingTailSeconds = EndingKeepsGoing(mode) ? gary::kSA3KeepsGoingTailSeconds : gary::kSA3EndsHereTailSeconds;
+  request.generationTailSeconds = loop ? 2.f : endingTailSeconds;
+  request.continuationTailSeconds = endingTailSeconds;
+
+  // Build the prompt actually sent: base + optional " <bpm> bpm" + optional " C minor".
+  // Mirrors gary4juce SA3UI (host tempo + key/scale get appended to the text prompt).
+  const double promptBpm = Bpm();
+  const std::string keyScale = KeyScaleText();
+  request.bpm = Bpm();
+  request.prompt = gary::PromptWithKeyScale(gary::PromptWithTempo(PromptForMode(mode), promptBpm), keyScale);
+
+  if (mode != RenderMode::Text)
+    request.sourceAudio = InitSnapshot();
+
+  const std::vector<gary::SA3LaneSource> sources = LaneSources();
+  for (const auto& source : sources)
+    if (source.strength > 0.f && !source.path.empty())
+      request.loras.push_back({source.path, source.strength});
+  // The published decoder correction targets SAME-L only. Keep its selection persistent while a small
+  // model is active, but never submit it to SAME-S.
+  if (request.variant == "medium" && DecoderLoraEnabled())
+  {
+    const std::string decoderPath = DecoderLoraPath();
+    if (!decoderPath.empty() && gary::FileSizeBytes(decoderPath) > 0)
+      request.loras.push_back({decoderPath, 1.f});
+  }
+
+  if (mAutomationOn && !mLanes.empty())
+    gary::AddLanesToRequest(request, mLanes, mLaneBlend, sources, promptBpm, keyScale,
+                            mode == RenderMode::Continue ? SourceSeconds() : 0.0, request.durationSeconds);
+  return request;
+}
+
+void SA3IPlug2Demo::FinishRender(gary::SA3RenderResult result)
+{
+  if (!result.ok)
+  {
+    SetStatus(result.cancelled ? "render cancelled" : result.error);
+    return;
+  }
+  mLastSeed.store(result.seed, std::memory_order_release);
+  mHasLastSeed.store(true, std::memory_order_release);
+  SetLaneBackdrop(result.audio, mLaneTimelineStart);
+  InstallOutput(std::move(result.audio));
+  SaveOutputToDisk();
+  SetStatus("render complete");
 }
 
 bool SA3IPlug2Demo::LoadDroppedAudioFile(const char* rawPath)
@@ -2226,7 +2293,6 @@ void SA3IPlug2Demo::LoadPersistedCreativeLoras()
     slot.name = info.name.empty() ? FileNameFromPath(info.path) : info.name;
     slot.prompts = info.prompts;
     slot.strength = saved.strength;
-    slot.enabled = saved.enabled;
     restored.push_back(std::move(slot));
   }
   {
@@ -2234,6 +2300,8 @@ void SA3IPlug2Demo::LoadPersistedCreativeLoras()
     mLoras = std::move(restored);
   }
   mCreativeLorasDirty.store(false, std::memory_order_release);
+  if (mAutomationOn)
+    SyncLanesToLoras();
   if (unavailable > 0)
     SetStatus(std::to_string(unavailable) + " remembered LoRA" + (unavailable == 1 ? " is" : "s are") + " unavailable");
 }
@@ -2249,26 +2317,27 @@ void SA3IPlug2Demo::PersistCreativeLoras()
   std::vector<gary::PersistedCreativeLora> savedLoras;
   savedLoras.reserve(snapshot.size());
   for (const auto& slot : snapshot)
-    savedLoras.push_back({slot.path, slot.strength, slot.enabled});
+    savedLoras.push_back({slot.path, slot.strength});
 
   const bool saved = gary::SaveCreativeLoraRegistry(ModelVariant(), savedLoras);
   mCreativeLorasDirty.store(!saved, std::memory_order_release);
 }
 
+// The native open dialog, returning UTF-8. Empty when cancelled.
+static std::string ChooseFile(IGraphics* ui, const char* extensions)
+{
+  if (!ui)
+    return {};
+  WDL_String fileName;
+  WDL_String directory;
+  ui->PromptForFile(fileName, directory, EFileAction::Open, extensions);
+  return fileName.Get();
+}
+
 bool SA3IPlug2Demo::ImportLoraFromDialog()
 {
-#ifdef _WIN32
-  char fileName[MAX_PATH] = {};
-  OPENFILENAMEA ofn = {};
-  ofn.lStructSize = sizeof(ofn);
-  ofn.hwndOwner = nullptr;
-  ofn.lpstrFilter = "SA3 LoRA (*.gguf;*.safetensors;*.ckpt)\0*.gguf;*.safetensors;*.ckpt\0GGUF LoRA (*.gguf)\0*.gguf\0Exported LoRA (*.safetensors)\0*.safetensors\0Checkpoint LoRA (*.ckpt)\0*.ckpt\0All files\0*.*\0";
-  ofn.lpstrFile = fileName;
-  ofn.nMaxFile = MAX_PATH;
-  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-  ofn.lpstrTitle = "Import SA3 LoRA";
-
-  if (!GetOpenFileNameA(&ofn))
+  const std::string fileName = ChooseFile(GetUI(), "gguf safetensors ckpt");
+  if (fileName.empty())
     return false;
 
   const auto info = gary::ImportLoraFile(fileName);
@@ -2282,8 +2351,7 @@ bool SA3IPlug2Demo::ImportLoraFromDialog()
   slot.path = info.path;
   slot.name = info.name.empty() ? FileNameFromPath(info.path) : info.name;
   slot.prompts = info.prompts;
-  slot.strength = 1.0f;
-  slot.enabled = true;
+  slot.strength = 0.0f;
   std::string status = "LoRA imported: " + slot.name;
   if (!slot.prompts.empty())
     status += " (" + std::to_string(slot.prompts.size()) + " prompts)";
@@ -2293,11 +2361,9 @@ bool SA3IPlug2Demo::ImportLoraFromDialog()
   }
   PersistCreativeLoras();
   SetStatus(status);
+  if (mAutomationOn)
+    SyncLanesToLoras();
   return true;
-#else
-  SetStatus("LoRA file picker is only implemented for Windows in this demo");
-  return false;
-#endif
 }
 
 void SA3IPlug2Demo::RemoveLora(size_t index)
@@ -2306,9 +2372,17 @@ void SA3IPlug2Demo::RemoveLora(size_t index)
     std::lock_guard<std::mutex> lock(mLoraMutex);
     if (index >= mLoras.size())
       return;
+    const int laneIndex = LaneIndexFor(mLoras[index].path);
+    if (laneIndex >= 0)
+      mLanes.erase(mLanes.begin() + laneIndex);
     mLoras.erase(mLoras.begin() + (ptrdiff_t)index);
   }
   PersistCreativeLoras();
+#if IPLUG_EDITOR
+  if (IGraphics* ui = GetUI())
+    if (auto* control = ui->GetControlWithTag(kCtrlTagLanes))
+      control->SetDirty(false);
+#endif
 }
 
 void SA3IPlug2Demo::SetLoraStrength(size_t index, float strength)
@@ -2321,17 +2395,6 @@ void SA3IPlug2Demo::SetLoraStrength(size_t index, float strength)
   }
   // Sliders update continuously while dragging; defer the disk write until the UI or instance closes.
   mCreativeLorasDirty.store(true, std::memory_order_release);
-}
-
-void SA3IPlug2Demo::SetLoraEnabled(size_t index, bool enabled)
-{
-  {
-    std::lock_guard<std::mutex> lock(mLoraMutex);
-    if (index >= mLoras.size())
-      return;
-    mLoras[index].enabled = enabled;
-  }
-  PersistCreativeLoras();
 }
 
 std::vector<SA3IPlug2Demo::LoraSlot> SA3IPlug2Demo::Loras() const
@@ -2368,11 +2431,13 @@ bool SA3IPlug2Demo::SerializeState(IByteChunk& chunk) const
   const uint8_t hasLastSeed = mHasLastSeed.load(std::memory_order_acquire) ? 1u : 0u;
   const double bpm = mBpm.load(std::memory_order_acquire);
   const uint8_t bpmOverride = mBpmOverride.load(std::memory_order_acquire) ? 1u : 0u;
-  const uint8_t appendBpm = mAppendBpm.load(std::memory_order_acquire) ? 1u : 0u;
+  const uint8_t appendBpm = 1u;   // kept so saved sessions keep their layout; the tempo is always sent
   const int32_t keyRoot = mKeyRoot.load(std::memory_order_acquire);
   const int32_t keyMode = mKeyMode.load(std::memory_order_acquire);
   const int32_t loopBars = mLoopBars.load(std::memory_order_acquire);
   const int32_t distShift = mDistShift.load(std::memory_order_acquire);
+  const uint8_t generateKeepsGoing = mGenerateKeepsGoing.load(std::memory_order_acquire) ? 1u : 0u;
+  const uint8_t continueKeepsGoing = mContinueKeepsGoing.load(std::memory_order_acquire) ? 1u : 0u;
   chunk.Put(&steps);
   chunk.Put(&cfgScale);
   chunk.Put(&initNoise);
@@ -2387,6 +2452,8 @@ bool SA3IPlug2Demo::SerializeState(IByteChunk& chunk) const
   chunk.Put(&keyMode);
   chunk.Put(&loopBars);
   chunk.Put(&distShift);
+  chunk.Put(&generateKeepsGoing);
+  chunk.Put(&continueKeepsGoing);
 
   {
     std::lock_guard<std::mutex> lock(mLoraMutex);
@@ -2396,8 +2463,30 @@ bool SA3IPlug2Demo::SerializeState(IByteChunk& chunk) const
     {
       chunk.PutStr(mLoras[i].path.c_str());
       chunk.Put(&mLoras[i].strength);
-      const uint8_t enabled = mLoras[i].enabled ? 1u : 0u;
+      const uint8_t enabled = 1u;   // kept so saved sessions keep their layout
       chunk.Put(&enabled);
+    }
+  }
+
+  const uint8_t automationOn = mAutomationOn ? 1u : 0u;
+  const uint8_t laneBlend = mLaneBlend == gary::SA3LaneBlend::Distinct ? 1u : 0u;
+  const uint8_t laneSnap = static_cast<uint8_t>(mLaneSnap);
+  const uint32_t laneCount = static_cast<uint32_t>(std::min(mLanes.size(), gary::kSA3MaxLanes));
+  chunk.Put(&automationOn);
+  chunk.Put(&laneBlend);
+  chunk.Put(&laneSnap);
+  chunk.Put(&laneCount);
+  for (uint32_t i = 0; i < laneCount; ++i)
+  {
+    chunk.PutStr(mLanes[i].path.c_str());
+    chunk.PutStr(mLanes[i].prompt.c_str());
+    const std::vector<gary::SA3LanePoint> points = gary::SimplifyLanePoints(mLanes[i].points);
+    const uint32_t pointCount = static_cast<uint32_t>(points.size());
+    chunk.Put(&pointCount);
+    for (const gary::SA3LanePoint& point : points)
+    {
+      chunk.Put(&point.position);
+      chunk.Put(&point.amount);
     }
   }
 
@@ -2414,7 +2503,7 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
   startPos = next;
 
   uint32_t version = 0;
-  if ((startPos = chunk.Get(&version, startPos)) < 0 || version != kPluginStateVersion)
+  if ((startPos = chunk.Get(&version, startPos)) < 0 || version < 1u || version > kPluginStateVersion)
     return -1;
 
   std::array<std::string, 3> prompts;
@@ -2455,6 +2544,9 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
   int32_t keyMode = 0;
   int32_t loopBars = 0;
   int32_t distShift = 0;
+  // Sessions from before the choice always rendered with the tail, so they keep sounding that way.
+  uint8_t generateKeepsGoing = 1;
+  uint8_t continueKeepsGoing = 1;
   if (!readValue(currentMode)) return -1;
   for (auto& duration : durations)
     if (!readValue(duration)) return -1;
@@ -2464,12 +2556,14 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
       || !readValue(appendBpm) || !readValue(keyRoot) || !readValue(keyMode)
       || !readValue(loopBars) || !readValue(distShift))
     return -1;
+  if (version >= 2u && (!readValue(generateKeepsGoing) || !readValue(continueKeepsGoing)))
+    return -1;
 
   uint32_t loraCount = 0;
   if (!readValue(loraCount) || loraCount > static_cast<uint32_t>(kMaxPersistedLoras))
     return -1;
 
-  struct SavedLora { std::string path; float strength = 1.f; bool enabled = true; };
+  struct SavedLora { std::string path; float strength = 0.f; };
   std::vector<SavedLora> savedLoras;
   savedLoras.reserve(loraCount);
   for (uint32_t i = 0; i < loraCount; ++i)
@@ -2478,8 +2572,41 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
     uint8_t enabled = 1;
     if (!readString(saved.path) || !readValue(saved.strength) || !readValue(enabled))
       return -1;
-    saved.enabled = enabled != 0;
+    if (enabled == 0)
+      saved.strength = 0.f;
     savedLoras.push_back(std::move(saved));
+  }
+
+  uint8_t automationOn = 0;
+  uint8_t laneBlend = 0;
+  uint8_t laneSnap = 0;
+  std::vector<gary::SA3Lane> restoredLanes;
+  if (version >= 2u)
+  {
+    uint32_t laneCount = 0;
+    if (!readValue(automationOn) || !readValue(laneBlend) || (version >= 3u && !readValue(laneSnap)) || !readValue(laneCount)
+        || laneCount > static_cast<uint32_t>(gary::kSA3MaxLanes))
+      return -1;
+    for (uint32_t i = 0; i < laneCount; ++i)
+    {
+      gary::SA3Lane lane;
+      uint32_t pointCount = 0;
+      if (!readString(lane.path) || !readString(lane.prompt) || !readValue(pointCount)
+          || pointCount > static_cast<uint32_t>(gary::kSA3MaxLanePoints))
+        return -1;
+      lane.name = gary::PathToUtf8(gary::PathFromUtf8(lane.path).stem());
+      for (uint32_t p = 0; p < pointCount; ++p)
+      {
+        float position = 0.f;
+        float amount = 0.f;
+        if (!readValue(position) || !readValue(amount))
+          return -1;
+        if (std::isfinite(position) && std::isfinite(amount))
+          lane.points.push_back({std::clamp(position, 0.f, 1.f), std::clamp(amount, 0.f, gary::kSA3MaxLaneAmount)});
+      }
+      gary::SortLanePoints(lane.points);
+      restoredLanes.push_back(std::move(lane));
+    }
   }
 
   std::vector<LoraSlot> restoredLoras;
@@ -2496,8 +2623,7 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
     slot.path = info.path;
     slot.name = info.name.empty() ? FileNameFromPath(info.path) : info.name;
     slot.prompts = info.prompts;
-    slot.strength = std::clamp(std::isfinite(saved.strength) ? saved.strength : 1.f, 0.f, 2.f);
-    slot.enabled = saved.enabled;
+    slot.strength = std::clamp(std::isfinite(saved.strength) ? saved.strength : 0.f, 0.f, 2.f);
     restoredLoras.push_back(std::move(slot));
   }
 
@@ -2517,15 +2643,34 @@ int SA3IPlug2Demo::UnserializeState(const IByteChunk& chunk, int startPos)
   mHasLastSeed.store(hasLastSeed != 0, std::memory_order_release);
   mBpm.store(std::clamp(std::isfinite(bpm) ? bpm : 120.0, 20.0, 300.0), std::memory_order_release);
   mBpmOverride.store(bpmOverride != 0, std::memory_order_release);
-  mAppendBpm.store(appendBpm != 0, std::memory_order_release);
   mKeyRoot.store(std::clamp<int32_t>(keyRoot, 0, 12), std::memory_order_release);
   mKeyMode.store(keyMode ? 1 : 0, std::memory_order_release);
   mLoopBars.store((loopBars == 4 || loopBars == 8 || loopBars == 16) ? loopBars : 0, std::memory_order_release);
   mDistShift.store(std::clamp<int32_t>(distShift, 0, 3), std::memory_order_release);
+  mGenerateKeepsGoing.store(generateKeepsGoing != 0, std::memory_order_release);
+  mContinueKeepsGoing.store(continueKeepsGoing != 0, std::memory_order_release);
   {
     std::lock_guard<std::mutex> lock(mLoraMutex);
     mLoras = std::move(restoredLoras);
   }
+  mLanes = std::move(restoredLanes);
+  mLaneBlend = laneBlend ? gary::SA3LaneBlend::Distinct : gary::SA3LaneBlend::OneSong;
+  mLaneSnap = gary::LaneSnapFromIndex(laneSnap);
+  mAutomationOn = automationOn != 0;
+  if (mAutomationOn)
+    SyncLanesToLoras();
+#if IPLUG_EDITOR
+  if (IGraphics* ui = GetUI())
+  {
+    if (auto* control = ui->GetControlWithTag(kCtrlTagLanes))
+      control->As<gary::ui::SA3LaneEditorControl>()->LanesReplaced();
+    mWindowLayoutPending.store(true, std::memory_order_release);
+  }
+  else
+  {
+    SetEditorSize(WindowWidth(), PLUG_HEIGHT);   // what the host asks for before the editor opens
+  }
+#endif
   // Host state is per instance; merely loading a preset must not replace the user's global LoRA defaults.
   mCreativeLorasDirty.store(false, std::memory_order_release);
   if (unavailableLoras > 0)
@@ -2547,12 +2692,8 @@ void SA3IPlug2Demo::SetKeepModelsResident(bool enabled)
 {
   mKeepModelsResident.store(enabled, std::memory_order_release);
   gary::SaveSetting("keep_models_resident", enabled ? "1" : "0");
-  if (!enabled && !Busy() && mContext)
-  {
-    if (mWorker.joinable())
-      mWorker.join();
-    TeardownContext();
-  }
+  if (!enabled)
+    mRenderService.ReleaseModels();
   SetStatus(enabled ? "models will stay resident between renders"
                     : "frugal mode enabled; idle GPU memory released");
 }
@@ -2592,16 +2733,9 @@ void SA3IPlug2Demo::ClearDecoderLoraSelection()
 
 bool SA3IPlug2Demo::ImportDecoderLoraFromDialog()
 {
-#ifdef _WIN32
-  char fileName[MAX_PATH] = {};
-  OPENFILENAMEA ofn = {};
-  ofn.lStructSize = sizeof(ofn);
-  ofn.lpstrFilter = "SA3 decoder LoRA (*.gguf;*.safetensors)\0*.gguf;*.safetensors\0All files\0*.*\0";
-  ofn.lpstrFile = fileName;
-  ofn.nMaxFile = MAX_PATH;
-  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-  ofn.lpstrTitle = "Choose SAME-L decoder correction LoRA";
-  if (!GetOpenFileNameA(&ofn)) return false;
+  const std::string fileName = ChooseFile(GetUI(), "gguf safetensors");
+  if (fileName.empty())
+    return false;
   const auto info = gary::ImportLoraFile(fileName);
   if (!info.ok) { SetStatus("decoder LoRA import failed: " + info.error); return false; }
   {
@@ -2613,10 +2747,6 @@ bool SA3IPlug2Demo::ImportDecoderLoraFromDialog()
   gary::SaveSetting("decoder_lora_same_l_enabled", "1");
   SetStatus("SAME-L decoder correction selected: " + FileNameFromPath(info.path));
   return true;
-#else
-  SetStatus("decoder LoRA file picker is currently available on Windows");
-  return false;
-#endif
 }
 
 void SA3IPlug2Demo::SetPeakNormalizeEnabled(bool enabled)
@@ -2749,6 +2879,16 @@ SA3IPlug2Demo::Waveform SA3IPlug2Demo::SourceWaveform(int bucketCount) const
     wf.peaks[(size_t)x].maxValue = std::clamp(mx, -1.f, 1.f);
   }
   return wf;
+}
+
+double SA3IPlug2Demo::OutputPlayheadSeconds() const
+{
+  const int playhead = mOutputPlayhead.load(std::memory_order_acquire);
+  const int rate = mOutputPlaybackSampleRate.load(std::memory_order_acquire);
+  // Paused keeps its place; stopped and never played are both back at the start and not playing.
+  if (rate <= 0 || (playhead <= 0 && !mOutputPlaying.load(std::memory_order_acquire)))
+    return -1.0;
+  return static_cast<double>(playhead) / rate;
 }
 
 SA3IPlug2Demo::Waveform SA3IPlug2Demo::OutputWaveform(int bucketCount) const
@@ -2949,267 +3089,6 @@ void SA3IPlug2Demo::MixOutputPlayback(sample** outputs, int nOutChans, int nFram
   }
 }
 
-SA3IPlug2Demo::RenderInput SA3IPlug2Demo::CaptureRenderInput(RenderMode mode)
-{
-  RenderInput input;
-  input.mode = mode;
-  input.durationSeconds = DurationSeconds();
-  input.steps = Steps();
-  input.cfgScale = CfgScale();
-  input.initNoiseLevel = InitNoiseLevel();
-  input.useSeed = UseSeed();
-  input.seed = SeedValue();
-  input.bpm = Bpm();
-  input.loopBars = (mode == RenderMode::Text) ? LoopBars() : 0;   // loops are Text-mode only
-  input.distShift = DistShift();
-  input.variant = ModelVariant();
-  input.peakNormalize = PeakNormalizeEnabled();
-  input.peakNormalizeDb = PeakNormalizeDb();
-  input.limiter = LimiterEnabled();
-  input.limiterCeilingDb = LimiterCeilingDb();
-  input.limiterKnee = LimiterKnee();
-  input.keepModelsResident = KeepModelsResident();
-
-  // Build the prompt actually sent: base + optional " <bpm> bpm" + optional " C minor".
-  // Mirrors gary4juce SA3UI (host tempo + key/scale get appended to the text prompt).
-  std::string prompt = PromptForMode(mode);
-  const std::string keyScale = KeyScaleText();
-  if ((AppendBpm() || input.loopBars > 0) && input.bpm > 0.0)
-  {
-    if (!prompt.empty()) prompt += ' ';
-    prompt += std::to_string((int)std::llround(input.bpm)) + " bpm";
-  }
-  if (!keyScale.empty())
-  {
-    if (!prompt.empty()) prompt += ' ';
-    prompt += keyScale;
-  }
-  input.prompt = std::move(prompt);
-  if (mode != RenderMode::Text)   // transform/continue use the FROZEN snapshot (myBuffer.wav), not the live scratch
-  {
-    std::lock_guard<std::mutex> lock(mSourceMutex);
-    input.sourceChannels = mInitBuffer;
-    input.sourceSamples = mInitSamples;
-    input.sourceSampleRate = mInitSampleRate;
-  }
-  {
-    std::lock_guard<std::mutex> lock(mLoraMutex);
-    for (const auto& lora : mLoras)
-      if (lora.enabled && lora.strength > 0.0f && !lora.path.empty())
-        input.loras.push_back(lora);
-  }
-  // The published decoder correction targets SAME-L only. Keep its selection persistent while a small
-  // model is active, but never submit it to SAME-S.
-  if (input.variant == "medium" && DecoderLoraEnabled())
-  {
-    const std::string decoderPath = DecoderLoraPath();
-    if (!decoderPath.empty() && gary::FileSizeBytes(decoderPath) > 0)
-      input.loras.push_back({"SAME-L decoder correction", decoderPath, {}, 1.0f, true});
-  }
-  return input;
-}
-
-void SA3IPlug2Demo::RenderWorkerMain(uint64_t requestId, RenderInput input)
-{
-  auto finish = [this, requestId](const std::string& status, bool forceStatus = false) {
-    if (forceStatus || requestId == mRequestId.load(std::memory_order_acquire))
-      SetStatus(status);
-    mProgress.store(0.f, std::memory_order_release);
-    mBusy.store(false, std::memory_order_release);
-  };
-
-  std::string loadError;
-  const Sa3Api* sa3 = LoadSa3Api(loadError);
-  if (!sa3)
-  {
-    finish("libsa3 load failed: " + loadError);
-    return;
-  }
-
-  auto cancelled = [this, requestId]() {
-    return mCancelRequested.load(std::memory_order_acquire)
-           || requestId != mRequestId.load(std::memory_order_acquire);
-  };
-
-  if (cancelled())
-  {
-    mCancelRequested.store(false, std::memory_order_release);
-    finish("render cancelled", true);
-    return;
-  }
-
-  sa3_error_v1 error = {};
-  error.size = sizeof(error);
-  sa3->api->error_init(&error);
-  if (!mContext)
-  {
-    SetStatus("loading libsa3 model (" + input.variant + ")");
-    sa3_context_config_v1 cfg = {};
-    cfg.size = sizeof(cfg);
-    sa3->api->context_config_init(&cfg);
-    const std::string models = ModelsDir();
-    cfg.models_dir = models.c_str();
-    cfg.variant = input.variant.c_str();
-    cfg.dit_encoding = "f16";
-    const sa3_status_v1 loadStatus = sa3->api->context_create(&cfg, &mContext, &error);
-    if (loadStatus != SA3_STATUS_OK_V1)
-    {
-      finish(std::string("sa3 context failed: ") + error.message);
-      return;
-    }
-    if (cancelled())
-    {
-      sa3->api->context_destroy(mContext);
-      mContext = nullptr;
-      mCancelRequested.store(false, std::memory_order_release);
-      finish("render cancelled", true);
-      return;
-    }
-  }
-
-  gary::RecordingSnapshot source = SourceSnapshotForSA3(input);
-  std::vector<float> planar = ToPlanar(source);
-
-  // Loop mode asks V1 for the exact bar length and gives the model two seconds of tail headroom.
-  double outputSeconds = (double)input.durationSeconds;
-  float generationTailSeconds = 6.0f;
-  if (input.mode == RenderMode::Text && input.loopBars > 0 && input.bpm > 0.0)
-  {
-    const double secondsPerBar = (60.0 / input.bpm) * 4.0;   // 4/4
-    outputSeconds = secondsPerBar * (double)input.loopBars;
-    generationTailSeconds = 2.0f;
-  }
-
-  sa3_request_v1 req = {};
-  req.size = sizeof(req);
-  sa3->api->request_init(&req);
-  req.operation = input.mode == RenderMode::Transform ? SA3_OPERATION_TRANSFORM_V1
-                : input.mode == RenderMode::Continue ? SA3_OPERATION_CONTINUE_V1
-                                                      : SA3_OPERATION_GENERATE_V1;
-  req.prompt = input.prompt.c_str();
-  req.duration_seconds = outputSeconds;
-  req.steps = input.steps;
-  req.seed = input.useSeed ? input.seed : -1;
-  req.cfg_scale = input.cfgScale;
-  req.generation_tail_padding_seconds = generationTailSeconds;
-  req.residency = input.keepModelsResident ? SA3_RESIDENCY_RESIDENT_V1
-                                          : SA3_RESIDENCY_FRUGAL_V1;
-  req.loudness.peak_normalize = input.peakNormalize ? 1 : 0;
-  req.loudness.peak_normalize_db = input.peakNormalizeDb;
-  req.loudness.limiter = input.limiter ? 1 : 0;
-  req.loudness.limiter_ceiling_db = input.limiterCeilingDb;
-  req.loudness.limiter_knee = input.limiterKnee;
-  // Intentionally not user-facing: these neutral values keep latent-domain controls out of this VST3.
-  req.loudness.latent_rescale = 1.0f;
-  req.loudness.latent_shift = 0.0f;
-  req.distribution_shift = static_cast<sa3_distribution_shift_v1>(std::clamp(input.distShift, 0, 3));
-  req.encode_chunk_size = input.mode == RenderMode::Text ? 0 : 128;
-  req.encode_overlap = 32;
-  req.decode_chunk_size = 128;
-  req.decode_overlap = 32;
-
-  std::vector<sa3_adapter_v1> adapters;
-  adapters.reserve(input.loras.size());
-  for (const auto& lora : input.loras)
-  {
-    sa3_adapter_v1 adapter = {};
-    adapter.size = sizeof(adapter);
-    sa3->api->adapter_init(&adapter);
-    adapter.path_or_name = lora.path.c_str();
-    adapter.strength = lora.strength;
-    adapters.push_back(adapter);
-  }
-  req.adapters = adapters.empty() ? nullptr : adapters.data();
-  req.adapter_count = static_cast<uint32_t>(adapters.size());
-
-  struct ProgressUser { SA3IPlug2Demo* self; uint64_t requestId; } progressUser{this, requestId};
-  req.callback_user = &progressUser;
-  req.on_progress = [](void* user, const sa3_progress_v1* update) {
-    auto* u = static_cast<ProgressUser*>(user);
-    if (!u || !update || u->requestId != u->self->mRequestId.load(std::memory_order_acquire))
-      return;
-    u->self->mProgress.store(update->fraction, std::memory_order_release);
-    char text[160] = {};
-    std::snprintf(text, sizeof text, "%s %d/%d %.0f%%",
-                  update->stage_name ? update->stage_name : "render",
-                  update->step, update->total, update->fraction * 100.0f);
-    u->self->SetStatus(text);
-  };
-  req.should_cancel = [](void* user) -> int32_t {
-    auto* u = static_cast<ProgressUser*>(user);
-    if (!u || !u->self)
-      return 1;
-    return u->self->mCancelRequested.load(std::memory_order_acquire)
-           || u->requestId != u->self->mRequestId.load(std::memory_order_acquire);
-  };
-
-  if (input.mode == RenderMode::Transform)
-  {
-    req.input_audio.samples = planar.data();
-    req.input_audio.n_samples = static_cast<uint64_t>(source.numSamples);
-    req.input_audio.n_channels = static_cast<uint32_t>(source.channels.size());
-    req.input_audio.sample_rate = static_cast<uint32_t>(source.sampleRate);
-    req.transform_noise_level = input.initNoiseLevel;
-  }
-  else if (input.mode == RenderMode::Continue)
-  {
-    const float sourceSeconds = source.numSamples > 0 ? (float)source.numSamples / std::max(1, source.sampleRate) : 0.f;
-    const float totalSeconds = std::max((float)input.durationSeconds, sourceSeconds + 4.0f);
-    req.duration_seconds = totalSeconds - sourceSeconds;
-    req.input_audio.samples = planar.data();
-    req.input_audio.n_samples = static_cast<uint64_t>(source.numSamples);
-    req.input_audio.n_channels = static_cast<uint32_t>(source.channels.size());
-    req.input_audio.sample_rate = static_cast<uint32_t>(source.sampleRate);
-  }
-
-  SetStatus(input.mode == RenderMode::Text ? "generating text audio"
-            : input.mode == RenderMode::Transform ? "transforming source"
-                                            : "continuing source");
-  sa3_result_v1 audio = {};
-  audio.size = sizeof(audio);
-  sa3->api->result_init(&audio);
-  const sa3_status_v1 status = sa3->api->generate(mContext, &req, &audio, &error);
-  if (status != SA3_STATUS_OK_V1)
-  {
-    if (status == SA3_STATUS_CANCELLED_V1 || cancelled())
-    {
-      mCancelRequested.store(false, std::memory_order_release);
-      finish("render cancelled", true);
-    }
-    else
-    {
-      finish(std::string("sa3 failed: ") + error.message);
-    }
-    return;
-  }
-
-  if (cancelled())
-  {
-    sa3->api->result_free(&audio);
-    mCancelRequested.store(false, std::memory_order_release);
-    finish("render cancelled", true);
-    return;
-  }
-
-  mLastSeed.store(RequestableSeed(audio.seed), std::memory_order_release);
-  mHasLastSeed.store(true, std::memory_order_release);
-  InstallOutputFromPlanar(audio.samples, static_cast<int>(audio.n_samples),
-                          static_cast<int>(audio.n_channels), static_cast<int>(audio.sample_rate));
-  sa3->api->result_free(&audio);
-  SaveOutputToDisk();
-  finish("render complete");
-}
-
-void SA3IPlug2Demo::StopWorker()
-{
-  mCancelRequested.store(true, std::memory_order_release);
-  mRequestId.fetch_add(1, std::memory_order_acq_rel);
-  if (mWorker.joinable())
-    mWorker.join();
-  mBusy.store(false, std::memory_order_release);
-  mCancelRequested.store(false, std::memory_order_release);
-}
-
 // ----- v0.3.0 model downloader (runs on its own worker thread; never the audio thread) ----------------
 
 namespace
@@ -3235,7 +3114,7 @@ void SA3IPlug2Demo::StartModelDownload(int variantIdx, const std::string& destDi
     SetStatus("pick a destination folder first");
     return;
   }
-  if (mBusy.load(std::memory_order_acquire))
+  if (Busy())
   {
     SetStatus("finish or cancel the current render before downloading");
     return;
@@ -3274,7 +3153,6 @@ void SA3IPlug2Demo::StopDownloadWorker()
 
 void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
 {
-  namespace fs = std::filesystem;
   const std::string variant = (variantIdx == 1) ? "small-music" : "medium";
   auto finish = [this]() {
     mDownloadProgress.store(0.0f, std::memory_order_release);
@@ -3304,7 +3182,7 @@ void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
   {
     if (mDownloadCancel.load(std::memory_order_acquire)) { SetStatus("download cancelled"); finish(); return; }
 
-    const std::string dest = (fs::path(destDir) / plan[i].filename).string();
+    const std::string dest = gary::PathToUtf8(gary::PathFromUtf8(destDir) / plan[i].filename);
     const std::string url = gary::HuggingFaceResolveUrl(plan[i].repo, plan[i].filename);
     const long long expected = sizes[i];
     long long localSize = (long long)gary::FileSizeBytes(dest);
@@ -3318,7 +3196,7 @@ void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
     }
     if (expected > 0 && localSize > expected)     // corrupt/oversized — restart this file fresh
     {
-      std::remove(dest.c_str());
+      gary::RemoveFile(dest);
       localSize = 0;
     }
 
@@ -3378,7 +3256,7 @@ void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
     // hand libsa3 a corrupt gguf. Delete it so the retry starts clean instead of resuming garbage.
     if (expected > 0 && (long long)gary::FileSizeBytes(dest) != expected)
     {
-      std::remove(dest.c_str());
+      gary::RemoveFile(dest);
       SetStatus("download of " + std::string(plan[i].what) + " was incomplete — click models to retry");
       finish();
       return;
@@ -3406,7 +3284,7 @@ void SA3IPlug2Demo::DownloadWorkerMain(int variantIdx, std::string destDir)
 
 void SA3IPlug2Demo::StartDecoderLoraDownload()
 {
-  if (mBusy.load(std::memory_order_acquire))
+  if (Busy())
   {
     SetStatus("finish or cancel the current render before downloading");
     return;
@@ -3421,7 +3299,6 @@ void SA3IPlug2Demo::StartDecoderLoraDownload()
 
 void SA3IPlug2Demo::DecoderLoraDownloadWorkerMain()
 {
-  namespace fs = std::filesystem;
   auto finish = [this]() {
     mDownloadProgress.store(0.0f, std::memory_order_release);
     mDownloading.store(false, std::memory_order_release);
@@ -3435,11 +3312,11 @@ void SA3IPlug2Demo::DecoderLoraDownloadWorkerMain()
   constexpr const char* kRepo = "thepatch/same-l-decoder-lora";
   constexpr const char* kFile = "squeakfix_v3.safetensors";
   const std::string url = gary::HuggingFaceResolveUrl(kRepo, kFile);
-  const std::string dest = (fs::path(dir) / kFile).string();
+  const std::string dest = gary::PathToUtf8(gary::PathFromUtf8(dir) / kFile);
   SetStatus("checking SAME-L decoder correction");
   const long long expected = gary::HttpContentLength(url);
   long long local = (long long)gary::FileSizeBytes(dest);
-  if (expected > 0 && local > expected) { std::remove(dest.c_str()); local = 0; }
+  if (expected > 0 && local > expected) { gary::RemoveFile(dest); local = 0; }
 
   if (!(expected > 0 && local == expected))
   {
@@ -3472,7 +3349,7 @@ void SA3IPlug2Demo::DecoderLoraDownloadWorkerMain()
 
   if (expected > 0 && (long long)gary::FileSizeBytes(dest) != expected)
   {
-    std::remove(dest.c_str());
+    gary::RemoveFile(dest);
     SetStatus("decoder download was incomplete - retry");
     finish();
     return;
@@ -3514,18 +3391,16 @@ void SA3IPlug2Demo::SetOutputStatus(const std::string& text)
   mOutputStatus = text;
 }
 
-void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate)
+void SA3IPlug2Demo::InstallOutput(gary::RecordingSnapshot audio)
 {
-  if (!samples || nSamp <= 0 || nCh <= 0)
+  const int nSamp = audio.numSamples;
+  const int sampleRate = audio.sampleRate;
+  if (nSamp <= 0 || audio.channels.empty())
     return;
-
-  std::vector<std::vector<float>> next((size_t)nCh, std::vector<float>((size_t)nSamp, 0.f));
-  for (int c = 0; c < nCh; ++c)
-    std::copy(samples + (size_t)c * nSamp, samples + (size_t)c * nSamp + nSamp, next[(size_t)c].begin());
 
   {
     std::lock_guard<std::mutex> lock(mOutputMutex);
-    mOutputBuffer = std::move(next);
+    mOutputBuffer = std::move(audio.channels);
     mOutputSamples = nSamp;
     mOutputSampleRate = std::max(1, sampleRate);
     // resets playhead to 0 and stops playback: the swap ends the previous audition cleanly (user's preference).
@@ -3536,26 +3411,6 @@ void SA3IPlug2Demo::InstallOutputFromPlanar(const float* samples, int nSamp, int
   std::snprintf(status, sizeof status, "output %.2fs @ %d Hz ready",
                 (double)nSamp / std::max(1, sampleRate), std::max(1, sampleRate));
   SetOutputStatus(status);
-}
-
-gary::RecordingSnapshot SA3IPlug2Demo::SourceSnapshotForSA3(const RenderInput& input) const
-{
-  gary::RecordingSnapshot snapshot;
-  snapshot.numSamples = input.sourceSamples;
-  snapshot.sampleRate = input.sourceSampleRate;
-  if (input.sourceSamples <= 0 || input.sourceChannels.empty())
-    return snapshot;
-
-  snapshot.channels.assign(kPreferredChannels, std::vector<float>((size_t)input.sourceSamples, 0.f));
-  const int sourceChannels = (int)input.sourceChannels.size();
-  for (int c = 0; c < kPreferredChannels; ++c)
-  {
-    const auto& src = input.sourceChannels[(size_t)(c % sourceChannels)];
-    const int n = std::min(input.sourceSamples, (int)src.size());
-    if (n > 0)
-      std::copy(src.begin(), src.begin() + n, snapshot.channels[(size_t)c].begin());
-  }
-  return snapshot;
 }
 
 std::string SA3IPlug2Demo::NormalizeDroppedPath(const char* rawPath)

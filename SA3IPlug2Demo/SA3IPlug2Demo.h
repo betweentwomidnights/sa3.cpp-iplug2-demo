@@ -2,7 +2,7 @@
 
 #include "DemoAudioFileStore.h"
 #include "IPlug_include_in_plug_hdr.h"
-#include "libsa3_v1.h"
+#include "SA3RenderService.h"
 
 #include <algorithm>
 #include <array>
@@ -55,8 +55,7 @@ public:
     std::string name;
     std::string path;
     std::vector<std::string> prompts;
-    float strength = 1.0f;
-    bool enabled = true;
+    float strength = 0.0f;
   };
 
   SA3IPlug2Demo(const InstanceInfo& info);
@@ -124,8 +123,8 @@ public:
   int64_t SeedValue() const noexcept { return mSeedValue.load(std::memory_order_acquire); }
   int64_t LastSeed() const noexcept { return mLastSeed.load(std::memory_order_acquire); }
   bool HasLastSeed() const noexcept { return mHasLastSeed.load(std::memory_order_acquire); }
-  float Progress() const noexcept { return mProgress.load(std::memory_order_acquire); }
-  bool Busy() const noexcept { return mBusy.load(std::memory_order_acquire); }
+  float Progress() const noexcept { return mRenderService.Progress(); }
+  bool Busy() const noexcept { return mRenderService.Busy(); }
   bool TransportRunning() const noexcept { return mTransportRunning.load(std::memory_order_acquire); }
   bool OutputPlaying() const noexcept { return mOutputPlaying.load(std::memory_order_acquire); }
 
@@ -148,8 +147,6 @@ public:
     mBpm.store(std::clamp(mBpm.load(std::memory_order_acquire) + delta, 20.0, 300.0), std::memory_order_release);
   }
   void ClearBpmOverride() { mBpmOverride.store(false, std::memory_order_release); }   // resume following host
-  bool AppendBpm() const noexcept { return mAppendBpm.load(std::memory_order_acquire); }
-  void ToggleAppendBpm() { mAppendBpm.store(!AppendBpm(), std::memory_order_release); }
   int KeyRoot() const noexcept { return mKeyRoot.load(std::memory_order_acquire); }   // 0=none, 1..12=C..B
   int KeyMode() const noexcept { return mKeyMode.load(std::memory_order_acquire); }   // 0=major, 1=minor
   void SetKeyRoot(int root) { mKeyRoot.store(std::clamp(root, 0, 12), std::memory_order_release); }
@@ -157,6 +154,12 @@ public:
   int LoopBars() const noexcept { return mLoopBars.load(std::memory_order_acquire); } // 0=off, 4/8/16
   void SetLoopBars(int bars) { mLoopBars.store((bars == 4 || bars == 8 || bars == 16) ? bars : 0, std::memory_order_release); }
   std::string KeyScaleText() const;   // "" when root=none, else "C minor"
+  // Each mode remembers its own ending. Transform follows its source and has none.
+  bool EndingKeepsGoing(RenderMode mode) const noexcept
+  {
+    return (mode == RenderMode::Continue ? mContinueKeepsGoing : mGenerateKeepsGoing).load(std::memory_order_acquire);
+  }
+  void SetEndingKeepsGoing(RenderMode mode, bool keepsGoing);
   int DistShift() const noexcept { return mDistShift.load(std::memory_order_acquire); }   // 0=LogSNR,1=Flux,2=Full,3=None
   void SetDistShift(int idx) { mDistShift.store(std::clamp(idx, 0, 3), std::memory_order_release); }
   const char* DistShiftName() const;  // libsa3 dist_shift string for the current index (default LogSNR)
@@ -170,8 +173,12 @@ public:
   bool ImportLoraFromDialog();
   void RemoveLora(size_t index);
   void SetLoraStrength(size_t index, float strength);
-  void SetLoraEnabled(size_t index, bool enabled);
   std::vector<LoraSlot> Loras() const;
+
+  // Automation: one curve per LoRA in a column beside the main panel, which widens the window.
+  bool AutomationOn() const noexcept { return mAutomationOn; }
+  void ToggleAutomation();
+  int LaneIndexFor(const std::string& path) const;
 
   // Decoder correction lives in Settings rather than the creative LoRA list. The currently published
   // adapter targets SAME-L, so it is remembered but not submitted while a SAME-S variant is active.
@@ -203,6 +210,7 @@ public:
   void ToggleOutputPlayback();
   void StopOutputPlayback();
   void SeekOutputPlayback(double seconds);
+  double OutputPlayheadSeconds() const;   // negative when nothing has been played from the output
 
   Waveform SourceWaveform(int bucketCount) const;
   Waveform OutputWaveform(int bucketCount) const;
@@ -212,32 +220,6 @@ private:
   static constexpr double kMaxRecordAllocationSampleRate = 192000.0;
   static constexpr int kPreferredChannels = 2;
 
-  struct RenderInput
-  {
-    std::string prompt;
-    RenderMode mode = RenderMode::Text;
-    int durationSeconds = 12;
-    int steps = 8;
-    float cfgScale = 1.0f;
-    float initNoiseLevel = 0.85f;
-    bool useSeed = false;
-    int64_t seed = 0;
-    double bpm = 0.0;       // host tempo captured at request time (0 = unknown)
-    int loopBars = 0;       // 0 = off; 4/8/16 = generate an exact bar-length loop (Text mode only)
-    int distShift = 0;      // 0=LogSNR,1=Flux,2=Full,3=None (libsa3 schedule warp)
-    std::string variant = "medium";   // model variant to load (medium | small-music)
-    std::vector<std::vector<float>> sourceChannels;
-    int sourceSamples = 0;
-    int sourceSampleRate = 44100;
-    std::vector<LoraSlot> loras;
-    bool peakNormalize = true;
-    float peakNormalizeDb = 2.0f;
-    bool limiter = true;
-    float limiterCeilingDb = -0.3f;
-    float limiterKnee = 0.8f;
-    bool keepModelsResident = false;
-  };
-
   static int ModeIndex(RenderMode mode) noexcept;
   void ResizeRecordBuffer(double sampleRate);
   void RebuildOutputPlaybackBufferFromNativeLocked(int hostSampleRate);
@@ -246,20 +228,25 @@ private:
   void LoadPersistedBuffer();   // restore myBuffer.wav into the frozen snapshot on startup
   void CopyInputToRecordBuffer(sample** inputs, int nInChans, int nFrames);
   void MixOutputPlayback(sample** outputs, int nOutChans, int nFrames);
-  RenderInput CaptureRenderInput(RenderMode mode);
-  void RenderWorkerMain(uint64_t requestId, RenderInput input);
-  void StopWorker();
+  gary::SA3RenderRequest BuildRenderRequest(RenderMode mode);
+  void FinishRender(gary::SA3RenderResult result);
+  double SourceSeconds() const;
+  double RenderSeconds(RenderMode mode) const;   // what the curves span: Continue's are over the added part
+  gary::RecordingSnapshot InitSnapshot() const;
+  std::vector<gary::SA3LaneSource> LaneSources() const;
+  void SyncLanesToLoras();
+  void SetLaneBackdrop(const gary::RecordingSnapshot& audio, double startSeconds);
+  int WindowWidth() const noexcept { return mAutomationOn ? PLUG_WIDTH * 2 : PLUG_WIDTH; }
+  void ApplyWindowLayout(IGraphics* ui);
   void DownloadWorkerMain(int variantIdx, std::string destDir);
   void DecoderLoraDownloadWorkerMain();
   void StopDownloadWorker();
-  void TeardownContext();   // free the loaded sa3_context (caller must ensure no render is running)
   void LoadPersistedCreativeLoras();
   void PersistCreativeLoras();
   void SetStatus(const std::string& text);
   void SetSourceStatus(const std::string& text);
   void SetOutputStatus(const std::string& text);
-  void InstallOutputFromPlanar(const float* samples, int nSamp, int nCh, int sampleRate);
-  gary::RecordingSnapshot SourceSnapshotForSA3(const RenderInput& input) const;
+  void InstallOutput(gary::RecordingSnapshot audio);
   static std::string NormalizeDroppedPath(const char* rawPath);
 
   mutable std::mutex mPromptMutex;
@@ -281,16 +268,16 @@ private:
   std::atomic<int64_t> mSeedValue{0};
   std::atomic<int64_t> mLastSeed{0};
   std::atomic<bool> mHasLastSeed{false};
-  std::atomic<float> mProgress{0.0f};
-  std::atomic<bool> mBusy{false};
   std::atomic<bool> mTransportRunning{false};
   std::atomic<double> mHostTempo{120.0};
   std::atomic<double> mBpm{120.0};
+  std::atomic<int> mBeatsPerBar{4};
   std::atomic<bool> mBpmOverride{false};
-  std::atomic<bool> mAppendBpm{true};
   std::atomic<int> mKeyRoot{0};
   std::atomic<int> mKeyMode{0};
   std::atomic<int> mLoopBars{0};
+  std::atomic<bool> mGenerateKeepsGoing{false};
+  std::atomic<bool> mContinueKeepsGoing{true};
   std::atomic<int> mDistShift{0};
 
   mutable std::mutex mSourceMutex;
@@ -323,6 +310,16 @@ private:
   std::vector<LoraSlot> mLoras;
   std::atomic<bool> mCreativeLorasDirty{false};
 
+  // Lanes are only touched on the UI thread, where hosts also save and restore state.
+  std::vector<gary::SA3Lane> mLanes;
+  gary::SA3LaneBlend mLaneBlend = gary::SA3LaneBlend::OneSong;
+  gary::SA3LaneSnap mLaneSnap = gary::SA3LaneSnap::Off;
+  std::vector<float> mLaneBackdrop;
+  bool mAutomationOn = false;
+  bool mLastRenderUsedLanes = false;
+  double mLaneTimelineStart = 0.0;
+  std::atomic<bool> mWindowLayoutPending{false};
+
   mutable std::mutex mDecoderLoraMutex;
   std::string mDecoderLoraPath;
   std::atomic<bool> mDecoderLoraEnabled{true};
@@ -334,10 +331,7 @@ private:
   std::atomic<bool> mKeepModelsResident{false};
 
   std::atomic<int> mHostSampleRate{44100};
-  std::thread mWorker;
-  std::atomic<uint64_t> mRequestId{0};
-  std::atomic<bool> mCancelRequested{false};
-  sa3_context* mContext = nullptr;
+  gary::SA3RenderService mRenderService;
 
   // Model management state. mModelsDirSetting ("" = fall through to env/default) + mModelVariant are loaded
   // from settings.txt in the ctor; guarded by mModelsMutex. mModelsPresent caches the file-set scan so Draw

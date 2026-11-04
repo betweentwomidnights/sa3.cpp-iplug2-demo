@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "ReaperExt_include_in_plug_hdr.h"
+#include "SA3LaneModel.h"
 #include "SA3RenderService.h"
 
 class MediaTrack;
@@ -38,6 +39,8 @@ enum EControlTags
   kCtrlTagRun,
   kCtrlTagSettingsButton,
   kCtrlTagSettings,
+  kCtrlTagAutomationButton,
+  kCtrlTagAutomation,
   kNumCtrlTags
 };
 
@@ -104,12 +107,25 @@ private:
   void ToggleUseSeed();
   void SetSeedValue(int64_t seed);
   void SetContinueSeconds(double seconds);
+  void SetKeyRoot(int root);
+  void SetKeyMode(int mode);
+  bool EndingKeepsGoing() const;
+  void SetEndingKeepsGoing(bool keepsGoing);
   double CurrentSourceLength() const;
   double EffectiveContinueSeconds() const;
   void RefreshPanel(bool force = false);
   void SetTaggedText(int tag, const char* text);
   void ApplyResponsiveLayout(IGraphics* graphics);
   void ToggleSettingsPage();
+  void ToggleAutomation();
+  void SyncLanesToCreativeLoras();
+  std::vector<gary::SA3LaneSource> LaneSources() const;
+  double LaneTimelineSeconds() const;
+  double LaneTimelineStart() const;
+  void UpdateLanePlayhead();
+  void SetLaneBackdrop(const gary::RecordingSnapshot& audio, double startSeconds);
+  int LaneIndexFor(const std::string& path) const;
+  bool LaneMissing(const std::string& path) const;
 
   void ReloadSharedSettings(bool scanModels = true);
   void ChooseModelsFolder();
@@ -134,7 +150,6 @@ private:
   void PersistCreativeLoras();
   void AddCreativeLora();
   void RemoveCreativeLora(size_t index);
-  void ToggleCreativeLora(size_t index);
   void SetCreativeLoraStrength(size_t index, float strength);
 
   struct PendingGeneration
@@ -143,6 +158,7 @@ private:
     Operation operation = Operation::Generate;
     double start = 0.0;
     double end = 0.0;
+    double laneTimelineStart = 0.0;
     std::string prompt;
   };
 
@@ -156,8 +172,7 @@ private:
   {
     std::string name;
     std::string path;
-    float strength = 1.f;
-    bool enabled = true;
+    float strength = 0.f;
   };
 
   Operation mOperation = Operation::Transform;
@@ -166,6 +181,10 @@ private:
   std::string mPrompt;
   int mDistShift = 0;
   double mContinueSeconds = 0.0;
+  int mKeyRoot = 0;
+  int mKeyMode = 0;
+  bool mGenerateKeepsGoing = false;
+  bool mContinueKeepsGoing = true;
   bool mUseSeed = false;
   int64_t mSeedValue = 0;
   bool mHasLastSeed = false;
@@ -175,7 +194,13 @@ private:
   std::vector<PendingPeakBuild> mPendingPeakBuilds;
   gary::SA3RenderService mRenderService;
 
+  std::vector<gary::SA3Lane> mLanes;
+  gary::SA3LaneBlend mLaneBlend = gary::SA3LaneBlend::OneSong;
+  gary::SA3LaneSnap mLaneSnap = gary::SA3LaneSnap::Off;
+  bool mLastRenderUsedLanes = false;
+
   bool mSettingsOpen = false;
+  bool mAutomationOn = false;
   bool mWideLayout = false;
   std::string mSettingsNotice = "Changes apply to the next render.";
   std::string mModelsDir;

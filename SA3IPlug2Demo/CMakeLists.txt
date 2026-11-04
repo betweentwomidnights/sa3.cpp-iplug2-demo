@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SA3IPlug2Demo VERSION 0.4.1)
+project(SA3IPlug2Demo VERSION 0.5.0)
 
 set(SA3_DEMO_PLATFORM_LIBS)
 if(WIN32)
@@ -16,6 +16,11 @@ iplug_add_plugin(${PROJECT_NAME}
     DemoAudioFileStore.cpp
     DemoAudioFileStore.h
     DemoUIPrimitives.h
+    ${CMAKE_SOURCE_DIR}/Shared/SA3RenderService.cpp
+    ${CMAKE_SOURCE_DIR}/Shared/SA3RenderService.h
+    ${CMAKE_SOURCE_DIR}/Shared/SA3LaneModel.h
+    ${CMAKE_SOURCE_DIR}/Shared/SA3LaneEditor.h
+    ${CMAKE_SOURCE_DIR}/Shared/SA3PromptOptions.h
     config.h
     resources/main.rc
     resources/resource.h

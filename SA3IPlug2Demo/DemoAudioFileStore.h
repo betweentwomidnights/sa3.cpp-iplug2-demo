@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -43,8 +44,7 @@ bool SaveSetting(const std::string& key, const std::string& value);    // upsert
 struct PersistedCreativeLora
 {
   std::string path;
-  float strength = 1.f;
-  bool enabled = true;
+  float strength = 0.f;   // 0 leaves the LoRA out of a render
 };
 
 std::vector<PersistedCreativeLora> LoadCreativeLoraRegistry(const std::string& variant);
@@ -107,5 +107,13 @@ AudioFileInfo LoadWavFile(const std::string& path, RecordingSnapshot& snapshot);
 RecordingSnapshot ResampleSnapshotLinear(const RecordingSnapshot& source, int targetSampleRate);
 bool ReadFileBase64(const std::string& path, std::string& base64, std::string& error);
 uint64_t FileSizeBytes(const std::string& path);
+
+// Paths here are UTF-8 on every platform, as they are for iPlug2, REAPER and libsa3. On Windows a narrow
+// stream, std::remove or std::filesystem::path reads them in the system code page instead, so anything
+// outside ASCII opens the wrong file or none. Convert at the point of use with these.
+std::filesystem::path PathFromUtf8(const std::string& path);
+std::string PathToUtf8(const std::filesystem::path& path);
+void RemoveFile(const std::string& path);
+std::string EnvironmentPath(const char* name);   // empty when unset
 
 } // namespace gary

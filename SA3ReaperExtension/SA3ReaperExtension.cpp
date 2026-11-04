@@ -15,6 +15,7 @@
 
 #include "IControls.h"
 #include "ITextEntryControl.h"
+#include "SA3LaneEditor.h"
 #include "SA3UITheme.h"
 #include "roboto.hpp"
 
@@ -87,13 +88,25 @@ public:
 
   void Draw(IGraphics& g) override
   {
-    gary::ui::DrawButton(g, mRECT, mLabel.c_str(), gary::ui::FontName, mHovered, mEnabled);
+    if (mActive)
+      gary::ui::DrawTab(g, mRECT, mLabel.c_str(), gary::ui::FontName, true);
+    else
+      gary::ui::DrawButton(g, mRECT, mLabel.c_str(), gary::ui::FontName, mHovered, mEnabled);
   }
 
   void OnMouseDown(float, float, const IMouseMod&) override
   {
     if (mEnabled && mAction)
       mAction();
+  }
+
+  void SetActive(bool active)
+  {
+    if (mActive != active)
+    {
+      mActive = active;
+      SetDirty(false);
+    }
   }
 
   void OnMouseOver(float, float, const IMouseMod&) override
@@ -131,6 +144,7 @@ private:
   std::function<void()> mAction;
   bool mHovered = false;
   bool mEnabled = true;
+  bool mActive = false;
 };
 
 class SA3PromptControl final : public IEditableTextControl
@@ -148,9 +162,14 @@ public:
     g.DrawRoundRect(gary::ui::FrameSoft(), mRECT, gary::ui::CornerRadius);
     const IRECT textBounds = mRECT.GetPadded(-10.f);
     if (GetStr()[0] != '\0')
-      g.DrawText(mText, GetStr(), textBounds);
+      g.DrawText(mText, gary::ui::FitText(g, mText, GetStr(), textBounds.W()).c_str(), textBounds);
     else
       g.DrawText(mText.WithFGColor(gary::ui::TextFaint()), "describe the audio to generate…", textBounds);
+  }
+
+  void OnMouseDown(float, float, const IMouseMod&) override
+  {
+    gary::ui::OpenPromptEntry(*this, mRECT, GetStr(), mText.mSize);
   }
 };
 
@@ -281,7 +300,7 @@ std::string CompactText(const std::string& text, size_t maxChars)
 
 std::string FileNameOnly(const std::string& path)
 {
-  return path.empty() ? std::string() : std::filesystem::path(path).filename().string();
+  return path.empty() ? std::string() : gary::PathToUtf8(gary::PathFromUtf8(path).filename());
 }
 
 std::string HumanBytes(uint64_t bytes)
@@ -300,6 +319,9 @@ std::string HumanBytes(uint64_t bytes)
 class SA3RenderOptionsControl final : public IControl
 {
 public:
+  static constexpr float kHeight = 55.f;
+  static constexpr float kContinueHeight = 81.f;   // Continue adds a row for its length
+
   SA3RenderOptionsControl(const IRECT& bounds, SA3ReaperExtension& owner)
   : IControl(bounds)
   , mOwner(owner)
@@ -339,10 +361,36 @@ public:
                      EAlign::Near, EVAlign::Middle), CompactText(seed, 22).c_str(),
                mSeedFieldRect.GetPadded(-6.f));
 
-    mDurationRect = {};
-    if (mOwner.mOperation == SA3ReaperExtension::Operation::Continue && mRECT.H() >= 48.f)
+    const float keyTop = top + 26.f;
+    g.DrawText(IText(10.f, TextDim(), FontName, EAlign::Near, EVAlign::Middle),
+               "key", IRECT(mRECT.L + 8.f, keyTop, mRECT.L + 42.f, keyTop + 22.f));
+    const int root = std::clamp(mOwner.mKeyRoot, 0, 12);
+    mKeyRootRect = IRECT(mRECT.L + 43.f, keyTop, mRECT.L + 95.f, keyTop + 22.f);
+    DrawDropButton(g, mKeyRootRect, gary::kSA3KeyRootNames[root]);
+    // Nothing is appended with no root, so the scale only appears once there is one.
+    mKeyModeRect = {};
+    if (root > 0)
     {
-      const IRECT row(mRECT.L + 8.f, top + 26.f, mRECT.R - 8.f, mRECT.B - 4.f);
+      mKeyModeRect = IRECT(mKeyRootRect.R + 4.f, keyTop, mKeyRootRect.R + 66.f, keyTop + 22.f);
+      DrawDropButton(g, mKeyModeRect, mOwner.mKeyMode ? "minor" : "major");
+    }
+
+    // Transform follows its source, so it has no ending to choose.
+    mEndsHereRect = {};
+    mKeepsGoingRect = {};
+    if (mOwner.mOperation != SA3ReaperExtension::Operation::Transform)
+    {
+      mKeepsGoingRect = IRECT(mRECT.R - 74.f, keyTop, mRECT.R - 8.f, keyTop + 22.f);
+      mEndsHereRect = IRECT(mKeepsGoingRect.L - 70.f, keyTop, mKeepsGoingRect.L - 4.f, keyTop + 22.f);
+      const bool keepsGoing = mOwner.EndingKeepsGoing();
+      DrawSegment(g, mEndsHereRect, "ends here", FontName, 10.f, !keepsGoing);
+      DrawSegment(g, mKeepsGoingRect, "keeps going", FontName, 10.f, keepsGoing);
+    }
+
+    mDurationRect = {};
+    if (mOwner.mOperation == SA3ReaperExtension::Operation::Continue && mRECT.H() >= kContinueHeight)
+    {
+      const IRECT row(mRECT.L + 8.f, keyTop + 26.f, mRECT.R - 8.f, mRECT.B - 4.f);
       const double sourceSeconds = mOwner.CurrentSourceLength();
       const int maximum = std::max(1, static_cast<int>(std::floor(300.0 - sourceSeconds)));
       const double seconds = mOwner.EffectiveContinueSeconds();
@@ -369,6 +417,22 @@ public:
     if (mShiftRect.Contains(x, y))
     {
       OpenShiftMenu();
+      return;
+    }
+    if (mKeyRootRect.Contains(x, y))
+    {
+      OpenKeyRootMenu();
+      return;
+    }
+    if (mKeyModeRect.Contains(x, y))
+    {
+      OpenKeyModeMenu();
+      return;
+    }
+    if (mEndsHereRect.Contains(x, y) || mKeepsGoingRect.Contains(x, y))
+    {
+      mOwner.SetEndingKeepsGoing(mKeepsGoingRect.Contains(x, y));
+      SetDirty(false);
       return;
     }
     if (mSeedToggleRect.Contains(x, y))
@@ -410,8 +474,12 @@ public:
     if (menu)
     {
       const int selected = menu->GetChosenItemIdx();
-      if (selected >= 0 && selected <= 3)
+      if (mActiveMenu == Menu::Shift && selected >= 0 && selected <= 3)
         mOwner.SetDistShift(selected);
+      else if (mActiveMenu == Menu::KeyRoot && selected >= 0 && selected <= 12)
+        mOwner.SetKeyRoot(selected);
+      else if (mActiveMenu == Menu::KeyMode && selected >= 0 && selected <= 1)
+        mOwner.SetKeyMode(selected);
     }
     SetDirty(false);
   }
@@ -455,13 +523,38 @@ private:
   {
     if (!GetUI())
       return;
-    mShiftMenu.Clear();
-    mShiftMenu.AddItem("LogSNR");
-    mShiftMenu.AddItem("Flux");
-    mShiftMenu.AddItem("Full");
-    mShiftMenu.AddItem("None");
-    mShiftMenu.CheckItem(std::clamp(mOwner.mDistShift, 0, 3), true);
-    GetUI()->CreatePopupMenu(*this, mShiftMenu, mShiftRect);
+    mMenu.Clear();
+    mMenu.AddItem("LogSNR");
+    mMenu.AddItem("Flux");
+    mMenu.AddItem("Full");
+    mMenu.AddItem("None");
+    mMenu.CheckItem(std::clamp(mOwner.mDistShift, 0, 3), true);
+    mActiveMenu = Menu::Shift;
+    GetUI()->CreatePopupMenu(*this, mMenu, mShiftRect);
+  }
+
+  void OpenKeyRootMenu()
+  {
+    if (!GetUI())
+      return;
+    mMenu.Clear();
+    for (const char* name : gary::kSA3KeyRootNames)
+      mMenu.AddItem(name);
+    mMenu.CheckItem(std::clamp(mOwner.mKeyRoot, 0, 12), true);
+    mActiveMenu = Menu::KeyRoot;
+    GetUI()->CreatePopupMenu(*this, mMenu, mKeyRootRect);
+  }
+
+  void OpenKeyModeMenu()
+  {
+    if (!GetUI())
+      return;
+    mMenu.Clear();
+    mMenu.AddItem("major");
+    mMenu.AddItem("minor");
+    mMenu.CheckItem(mOwner.mKeyMode ? 1 : 0, true);
+    mActiveMenu = Menu::KeyMode;
+    GetUI()->CreatePopupMenu(*this, mMenu, mKeyModeRect);
   }
 
   void UpdateDuration(float x)
@@ -477,8 +570,13 @@ private:
   }
 
   SA3ReaperExtension& mOwner;
-  IPopupMenu mShiftMenu;
+  enum class Menu { Shift, KeyRoot, KeyMode } mActiveMenu = Menu::Shift;
+  IPopupMenu mMenu;
   IRECT mShiftRect;
+  IRECT mKeyRootRect;
+  IRECT mKeyModeRect;
+  IRECT mEndsHereRect;
+  IRECT mKeepsGoingRect;
   IRECT mSeedToggleRect;
   IRECT mSeedFieldRect;
   IRECT mDurationRect;
@@ -762,7 +860,6 @@ public:
   void Draw(IGraphics& g) override
   {
     using namespace gary::ui;
-    mToggleRects.clear();
     mSliderRects.clear();
     mRemoveRects.clear();
 
@@ -785,45 +882,55 @@ public:
       return;
     }
 
-    const size_t rows = std::min<size_t>(2, mOwner.mCreativeLoras.size());
+    const size_t total = mOwner.mCreativeLoras.size();
+    const size_t fit = std::max<size_t>(1, static_cast<size_t>(std::max(0.f, mRECT.H() - 30.f) / kRowPitch));
+    const size_t rows = std::min(fit, total);
+    mFirstRow = std::min(mFirstRow, total - rows);
     for (size_t i = 0; i < rows; ++i)
     {
-      const auto& lora = mOwner.mCreativeLoras[i];
-      const float top = mRECT.T + 27.f + static_cast<float>(i) * 17.f;
-      const IRECT row(left, top, right, top + 15.f);
-      const IRECT toggle(row.L, row.T + 1.f, row.L + 13.f, row.B - 1.f);
+      const auto& lora = mOwner.mCreativeLoras[mFirstRow + i];
+      const float top = mRECT.T + 27.f + static_cast<float>(i) * kRowPitch;
+      const IRECT row(left, top, right, top + 16.f);
       const IRECT remove(row.R - 18.f, row.T, row.R, row.B);
       const IRECT value(remove.L - 34.f, row.T, remove.L - 2.f, row.B);
-      const float sliderWidth = std::clamp(row.W() * 0.28f, 76.f, 150.f);
+      const float sliderWidth = std::clamp(row.W() * 0.34f, 90.f, 180.f);
       const IRECT slider(value.L - sliderWidth - 5.f, row.T + 1.f, value.L - 5.f, row.B - 1.f);
-      const IRECT label(toggle.R + 5.f, row.T, slider.L - 7.f, row.B);
-      mToggleRects.push_back(toggle);
+      const IRECT label(row.L, row.T, slider.L - 7.f, row.B);
       mSliderRects.push_back(slider);
       mRemoveRects.push_back(remove);
 
-      g.DrawRoundRect(lora.enabled ? Red() : Frame(), toggle, 2.f);
-      if (lora.enabled)
-        g.FillRoundRect(Red(), toggle.GetPadded(-3.5f), 1.f);
-      g.DrawText(IText(10.f, COLOR_WHITE, FontName, EAlign::Near, EVAlign::Middle),
+      // While a lane is drawing this LoRA the curve sets its strength, so the slider steps aside.
+      const int laneIndex = mOwner.mAutomationOn ? mOwner.LaneIndexFor(lora.path) : -1;
+      g.DrawText(IText(10.f, laneIndex >= 0 || lora.strength > 0.f ? COLOR_WHITE : TextDim(), FontName,
+                       EAlign::Near, EVAlign::Middle),
                  CompactText(lora.name, 30).c_str(), label);
 
       const IRECT track(slider.L, slider.MH() - 1.5f, slider.R, slider.MH() + 1.5f);
-      const float fraction = std::clamp(lora.strength * 0.5f, 0.f, 1.f);
-      const float filled = slider.L + slider.W() * fraction;
       g.FillRoundRect(FrameSoft(), track, 1.5f);
-      g.FillRoundRect(lora.enabled ? Red() : Frame(), IRECT(track.L, track.T, filled, track.B), 1.5f);
-      g.FillCircle(lora.enabled ? COLOR_WHITE : TextDim(), filled, slider.MH(), 4.f);
-      char strength[16] = {};
-      std::snprintf(strength, sizeof(strength), "%.2f", lora.strength);
-      g.DrawText(IText(9.f, TextDim(), FontName, EAlign::Center, EVAlign::Middle), strength, value);
+      if (laneIndex >= 0)
+      {
+        g.DrawText(IText(9.f, SA3LaneEditorControl::LaneColor(laneIndex), FontName, EAlign::Center, EVAlign::Middle),
+                   "lane", value);
+      }
+      else
+      {
+        const float fraction = std::clamp(lora.strength * 0.5f, 0.f, 1.f);
+        const float filled = slider.L + slider.W() * fraction;
+        g.FillRoundRect(Red(), IRECT(track.L, track.T, filled, track.B), 1.5f);
+        g.FillCircle(COLOR_WHITE, filled, slider.MH(), 4.f);
+        char strength[16] = {};
+        std::snprintf(strength, sizeof(strength), "%.2f", lora.strength);
+        g.DrawText(IText(9.f, TextDim(), FontName, EAlign::Center, EVAlign::Middle), strength, value);
+      }
       DrawButton(g, remove, "x", FontName);
     }
 
-    if (mOwner.mCreativeLoras.size() > rows)
+    if (total > rows)
     {
-      const std::string more = "+" + std::to_string(mOwner.mCreativeLoras.size() - rows);
+      const std::string more = std::to_string(mFirstRow + 1) + "-" + std::to_string(mFirstRow + rows)
+                             + " of " + std::to_string(total);
       g.DrawText(IText(9.f, TextDim(), FontName, EAlign::Far, EVAlign::Middle),
-                 more.c_str(), IRECT(mAddRect.L - 34.f, mRECT.T + 4.f, mAddRect.L - 4.f, mRECT.T + 22.f));
+                 more.c_str(), IRECT(mAddRect.L - 50.f, mRECT.T + 4.f, mAddRect.L - 4.f, mRECT.T + 22.f));
     }
   }
 
@@ -835,21 +942,17 @@ public:
       SetDirty(false);
       return;
     }
-    for (size_t i = 0; i < mToggleRects.size(); ++i)
+    for (size_t i = 0; i < mSliderRects.size(); ++i)
     {
-      if (mToggleRects[i].Contains(x, y))
-      {
-        mOwner.ToggleCreativeLora(i);
-        SetDirty(false);
-        return;
-      }
+      const size_t index = mFirstRow + i;
       if (mRemoveRects[i].Contains(x, y))
       {
-        mOwner.RemoveCreativeLora(i);
+        mOwner.RemoveCreativeLora(index);
         SetDirty(false);
         return;
       }
-      if (mSliderRects[i].Contains(x, y))
+      const bool locked = mOwner.mAutomationOn && mOwner.LaneIndexFor(mOwner.mCreativeLoras[index].path) >= 0;
+      if (mSliderRects[i].Contains(x, y) && !locked)
       {
         mActiveSlider = i;
         UpdateSlider(x);
@@ -869,6 +972,17 @@ public:
     mActiveSlider = static_cast<size_t>(-1);
   }
 
+  void OnMouseWheel(float, float, const IMouseMod&, float d) override
+  {
+    if (d < 0.f && mFirstRow + mSliderRects.size() < mOwner.mCreativeLoras.size())
+      ++mFirstRow;
+    else if (d > 0.f && mFirstRow > 0)
+      --mFirstRow;
+    SetDirty(false);
+  }
+
+  static constexpr float kRowPitch = 19.f;
+
 private:
   void UpdateSlider(float x)
   {
@@ -876,13 +990,13 @@ private:
       return;
     const IRECT& slider = mSliderRects[mActiveSlider];
     const float fraction = std::clamp((x - slider.L) / std::max(1.f, slider.W()), 0.f, 1.f);
-    mOwner.SetCreativeLoraStrength(mActiveSlider, fraction * 2.f);
+    mOwner.SetCreativeLoraStrength(mFirstRow + mActiveSlider, fraction * 2.f);
     SetDirty(false);
   }
 
   SA3ReaperExtension& mOwner;
   IRECT mAddRect;
-  std::vector<IRECT> mToggleRects;
+  size_t mFirstRow = 0;
   std::vector<IRECT> mSliderRects;
   std::vector<IRECT> mRemoveRects;
   size_t mActiveSlider = static_cast<size_t>(-1);
@@ -923,6 +1037,8 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
   IMPAPI(GetMediaSourceType);
   IMPAPI(TakeIsMIDI);
   IMPAPI(GetSet_LoopTimeRange2);
+  IMPAPI(GetPlayState);
+  IMPAPI(GetPlayPosition);
   IMPAPI(TimeMap_GetTimeSigAtTime);
   IMPAPI(ValidatePtr2);
   IMPAPI(CountTrackMediaItems);
@@ -1009,6 +1125,42 @@ SA3ReaperExtension::SA3ReaperExtension(reaper_plugin_info_t* pRec)
     graphics->AttachControl(new SA3ActionButton(initial, "settings",
       [this]() { ToggleSettingsPage(); }), kCtrlTagSettingsButton);
     graphics->AttachControl(new SA3SettingsControl(initial, *this), kCtrlTagSettings);
+    graphics->AttachControl(new SA3ActionButton(initial, "automation",
+      [this]() { ToggleAutomation(); }), kCtrlTagAutomationButton);
+
+    gary::ui::SA3LaneEditorControl::Host laneHost;
+    laneHost.isMissing = [this](const gary::SA3Lane& lane) { return LaneMissing(lane.path); };
+    laneHost.resetStrength = [this](const gary::SA3Lane& lane) {
+      for (const auto& lora : mCreativeLoras)
+        if (lora.path == lane.path)
+          return lora.strength;
+      return 0.f;
+    };
+    laneHost.rollPrompt = [this](const gary::SA3Lane& lane) {
+      const auto pool = gary::LoadPromptPoolForLora(lane.path, lane.name);
+      if (pool.empty())
+      {
+        mPanelStatus = "No prompt pool found for " + lane.name + ".";
+        RefreshPanel(true);
+        return std::string();
+      }
+      std::random_device randomDevice;
+      std::mt19937 random(randomDevice());
+      std::uniform_int_distribution<size_t> choose(0, pool.size() - 1u);
+      return pool[choose(random)];
+    };
+    laneHost.notify = [this](const std::string& message) {
+      mPanelStatus = message;
+      RefreshPanel(true);
+    };
+    laneHost.changed = [this]() {
+      MarkProjectDirty(nullptr);
+      if (IGraphics* ui = GetUI())
+        if (IControl* control = ui->GetControlWithTag(kCtrlTagCreativeLoras))
+          control->SetDirty(false);
+    };
+    graphics->AttachControl(new gary::ui::SA3LaneEditorControl(initial, mLanes, mLaneBlend, mLaneSnap, std::move(laneHost)),
+                            kCtrlTagAutomation);
 
     ApplyResponsiveLayout(graphics);
     RefreshPanel(true);
@@ -1028,7 +1180,8 @@ void SA3ReaperExtension::OnIdle()
   const bool completed = mRenderService.TakeCompletedResult(result);
   if (completed)
     FinishGeneration(std::move(result));
-  if (completed && !mKeepModelsResident)
+  // Lane renders are always frugal, so nothing stays resident for the context to hold on to.
+  if (completed && (!mKeepModelsResident || mLastRenderUsedLanes))
     mRenderService.ReleaseModels();
   ContinuePendingPeakBuilds();
 
@@ -1048,6 +1201,7 @@ void SA3ReaperExtension::OnIdle()
 
   RefreshPanel(completed || decoderFinished || mRenderService.Busy()
                || mDecoderDownloadBusy.load(std::memory_order_acquire));
+  UpdateLanePlayhead();
 }
 
 void SA3ReaperExtension::OnActionRun(int, int)
@@ -1065,14 +1219,22 @@ void SA3ReaperExtension::ApplyResponsiveLayout(IGraphics* graphics)
   mWideLayout = bounds.W() >= 860.f;
 
   const float columnGap = 18.f;
-  const IRECT main = mWideLayout
+  const bool wantsSide = mSettingsOpen || mAutomationOn;
+  const bool split = mWideLayout && wantsSide;
+  // With nothing beside it the main column sits centered. Automation or settings split the window
+  // equally when it's wide enough; narrower, they are a page of their own.
+  const float centeredWidth = wantsSide ? content.W() : std::min(content.W(), 560.f);
+  const IRECT main = split
     ? IRECT(content.L, content.T, content.MW() - columnGap * 0.5f, content.B)
-    : content;
-  const IRECT settings = mWideLayout
+    : IRECT(content.MW() - centeredWidth * 0.5f, content.T, content.MW() + centeredWidth * 0.5f, content.B);
+  const IRECT side = split
     ? IRECT(content.MW() + columnGap * 0.5f, content.T, content.R, content.B)
     : IRECT(content.L, content.T + 42.f, content.R, content.B);
-  const bool showMain = mWideLayout || !mSettingsOpen;
-  const bool showSettings = mWideLayout || mSettingsOpen;
+  const bool showSettings = mSettingsOpen;
+  const bool showLanes = mAutomationOn && !mSettingsOpen;
+  // The page keeps the base prompt, seed and run button, so re-rendering stays one click away.
+  const bool lanesPage = showLanes && !mWideLayout;
+  const bool showMain = mWideLayout || !wantsSide;
 
   auto place = [graphics](int tag, const IRECT& rect, bool visible = true) {
     if (IControl* control = graphics->GetControlWithTag(tag))
@@ -1083,9 +1245,10 @@ void SA3ReaperExtension::ApplyResponsiveLayout(IGraphics* graphics)
   };
 
   place(kCtrlTagBackground, bounds);
-  const IRECT title(main.L, main.T, main.R - (mWideLayout ? 0.f : 92.f), main.T + 32.f);
+  const IRECT title(main.L, main.T, main.R - 192.f, main.T + 32.f);
   place(kCtrlTagOperation, title);
-  place(kCtrlTagSettingsButton, IRECT(main.R - 82.f, main.T + 3.f, main.R, main.T + 29.f), !mWideLayout);
+  place(kCtrlTagSettingsButton, IRECT(main.R - 82.f, main.T + 3.f, main.R, main.T + 29.f));
+  place(kCtrlTagAutomationButton, IRECT(main.R - 182.f, main.T + 3.f, main.R - 90.f, main.T + 29.f));
 
   const IRECT tabs(main.L, main.T + 46.f, main.R, main.T + 86.f);
   const float tabGap = 7.f;
@@ -1096,27 +1259,44 @@ void SA3ReaperExtension::ApplyResponsiveLayout(IGraphics* graphics)
   place(kCtrlTagContinue, IRECT(tabs.R - tabWidth, tabs.T, tabs.R, tabs.B), showMain);
   place(kCtrlTagSelection, IRECT(main.L, main.T + 94.f, main.R, main.T + 125.f), showMain);
   place(kCtrlTagTiming, IRECT(main.L, main.T + 127.f, main.R, main.T + 149.f), showMain);
-  place(kCtrlTagRenderOptions, IRECT(main.L, main.T + 153.f, main.R, main.T + 208.f), showMain);
-  const IRECT prompt(main.L, main.T + 214.f, main.R - 42.f, main.T + 252.f);
-  place(kCtrlTagPrompt, prompt, showMain);
-  place(kCtrlTagDice, IRECT(prompt.R + 7.f, prompt.T, main.R, prompt.B), showMain);
-  place(kCtrlTagCreativeLoras, IRECT(main.L, main.T + 258.f, main.R, main.T + 316.f), showMain);
-  place(kCtrlTagRun, IRECT(main.L, main.T + 322.f, main.R, main.T + 354.f), showMain);
-  place(kCtrlTagHint, IRECT(main.L, std::max(main.T + 360.f, main.B - 42.f), main.R, main.B), showMain);
-  place(kCtrlTagSettings, settings, showSettings);
+  const float optionsHeight = mOperation == Operation::Continue ? SA3RenderOptionsControl::kContinueHeight
+                                                                : SA3RenderOptionsControl::kHeight;
+  const IRECT options = lanesPage ? IRECT(main.L, main.B - 38.f - optionsHeight, main.R, main.B - 38.f)
+                                  : IRECT(main.L, main.T + 153.f, main.R, main.T + 153.f + optionsHeight);
+  place(kCtrlTagRenderOptions, options, showMain || lanesPage);
+  const IRECT prompt = lanesPage ? IRECT(main.L, main.T + 42.f, main.R - 42.f, main.T + 80.f)
+                                 : IRECT(main.L, options.B + 6.f, main.R - 42.f, options.B + 44.f);
+  place(kCtrlTagPrompt, prompt, showMain || lanesPage);
+  place(kCtrlTagDice, IRECT(prompt.R + 7.f, prompt.T, main.R, prompt.B), showMain || lanesPage);
+  // The LoRA list grows to show every LoRA while the window has room, and scrolls after that.
+  const float listTop = prompt.B + 6.f;
+  const float listMinimum = 30.f + 2.f * SA3CreativeLoraControl::kRowPitch;
+  const float listWanted = 30.f + static_cast<float>(std::max<size_t>(2, mCreativeLoras.size())) * SA3CreativeLoraControl::kRowPitch;
+  const float listRoom = main.B - listTop - 86.f;
+  const float listBottom = listTop + std::max(listMinimum, std::min(listWanted, listRoom));
+  place(kCtrlTagCreativeLoras, IRECT(main.L, listTop, main.R, listBottom), showMain);
+  place(kCtrlTagRun, lanesPage ? IRECT(main.L, main.B - 32.f, main.R, main.B)
+                               : IRECT(main.L, listBottom + 6.f, main.R, listBottom + 38.f),
+        showMain || lanesPage);
+  place(kCtrlTagHint, IRECT(main.L, std::max(listBottom + 44.f, main.B - 42.f), main.R, main.B), showMain);
+  place(kCtrlTagSettings, side, showSettings);
+  place(kCtrlTagAutomation, lanesPage ? IRECT(side.L, main.T + 86.f, side.R, options.T - 6.f) : side, showLanes);
 
   if (IControl* control = graphics->GetControlWithTag(kCtrlTagSettingsButton))
   {
     if (auto* button = control->As<SA3ActionButton>())
       button->SetLabel(mSettingsOpen ? "back" : "settings");
   }
+  if (IControl* control = graphics->GetControlWithTag(kCtrlTagAutomationButton))
+  {
+    if (auto* button = control->As<SA3ActionButton>())
+      button->SetActive(mAutomationOn);
+  }
   graphics->SetAllControlsDirty();
 }
 
 void SA3ReaperExtension::ToggleSettingsPage()
 {
-  if (mWideLayout)
-    return;
   if (IGraphics* ui = GetUI())
   {
     if (auto* textEntry = ui->GetTextEntryControl(); textEntry && textEntry->EditInProgress())
@@ -1127,6 +1307,96 @@ void SA3ReaperExtension::ToggleSettingsPage()
     ReloadSharedSettings();
   ApplyResponsiveLayout(GetUI());
   RefreshPanel(true);
+}
+
+void SA3ReaperExtension::ToggleAutomation()
+{
+  if (IGraphics* ui = GetUI())
+  {
+    if (auto* textEntry = ui->GetTextEntryControl(); textEntry && textEntry->EditInProgress())
+      textEntry->CommitEdit();
+  }
+  mAutomationOn = !mAutomationOn;
+  mSettingsOpen = false;
+  if (mAutomationOn)
+    SyncLanesToCreativeLoras();
+  MarkProjectDirty(nullptr);
+  ApplyResponsiveLayout(GetUI());
+  RefreshPanel(true);
+}
+
+std::vector<gary::SA3LaneSource> SA3ReaperExtension::LaneSources() const
+{
+  std::vector<gary::SA3LaneSource> sources;
+  sources.reserve(mCreativeLoras.size());
+  for (const auto& lora : mCreativeLoras)
+    sources.push_back({lora.name, lora.path, lora.strength});
+  return sources;
+}
+
+void SA3ReaperExtension::SyncLanesToCreativeLoras()
+{
+  const std::string unsupported = gary::SyncLanes(mLanes, LaneSources());
+  if (!unsupported.empty())
+    mPanelStatus = unsupported + " can't run in a lane, so it stays at its fixed strength.";
+  if (IGraphics* ui = GetUI())
+  {
+    if (IControl* control = ui->GetControlWithTag(kCtrlTagAutomation))
+      control->SetDirty(false);
+    if (IControl* control = ui->GetControlWithTag(kCtrlTagCreativeLoras))
+      control->SetDirty(false);
+  }
+}
+
+double SA3ReaperExtension::LaneTimelineSeconds() const
+{
+  if (mOperation == Operation::Continue)
+    return CurrentSourceLength() >= 1.0 ? EffectiveContinueSeconds() : 0.0;
+  if (mOperation == Operation::Transform)
+    return CurrentSourceLength();
+  return std::max(0.0, mSelection.timeEnd - mSelection.timeStart);
+}
+
+// Where the curves' time zero sits in the project, read from the selection the render will replace.
+double SA3ReaperExtension::LaneTimelineStart() const
+{
+  if (mOperation == Operation::Generate)
+    return mSelection.timeStart;
+  const double sourceStart = mSelection.timeEnd > mSelection.timeStart ? std::max(mSelection.timeStart, mSelection.itemStart)
+                                                                       : mSelection.itemStart;
+  return mOperation == Operation::Continue ? sourceStart + CurrentSourceLength() : sourceStart;
+}
+
+// REAPER's transport is the only playback here, so the cursor just reads where it is each tick.
+void SA3ReaperExtension::UpdateLanePlayhead()
+{
+  IGraphics* ui = GetUI();
+  if (!ui || !mAutomationOn)
+    return;
+  const bool playing = (GetPlayState() & 1) != 0;
+  if (IControl* control = ui->GetControlWithTag(kCtrlTagAutomation))
+    control->As<gary::ui::SA3LaneEditorControl>()->SetPlayhead(playing ? GetPlayPosition() - LaneTimelineStart() : -1.0);
+}
+
+void SA3ReaperExtension::SetLaneBackdrop(const gary::RecordingSnapshot& audio, double startSeconds)
+{
+  if (IGraphics* ui = GetUI())
+    if (IControl* control = ui->GetControlWithTag(kCtrlTagAutomation))
+      control->As<gary::ui::SA3LaneEditorControl>()->SetBackdrop(gary::WaveformPeaks(audio, startSeconds));
+}
+
+int SA3ReaperExtension::LaneIndexFor(const std::string& path) const
+{
+  for (size_t i = 0; i < mLanes.size(); ++i)
+    if (mLanes[i].path == path)
+      return static_cast<int>(i);
+  return -1;
+}
+
+bool SA3ReaperExtension::LaneMissing(const std::string& path) const
+{
+  return std::none_of(mCreativeLoras.begin(), mCreativeLoras.end(),
+                      [&](const CreativeLora& lora) { return lora.path == path; });
 }
 
 void SA3ReaperExtension::ReloadSharedSettings(bool scanModels)
@@ -1290,7 +1560,6 @@ void SA3ReaperExtension::StartOrCancelDecoderLoraDownload()
 
 void SA3ReaperExtension::DecoderLoraDownloadWorkerMain()
 {
-  namespace fs = std::filesystem;
   auto finish = [this]() {
     mDecoderDownloadBusy.store(false, std::memory_order_release);
     mDecoderDownloadRevision.fetch_add(1, std::memory_order_acq_rel);
@@ -1308,12 +1577,12 @@ void SA3ReaperExtension::DecoderLoraDownloadWorkerMain()
   constexpr const char* kRepository = "thepatch/same-l-decoder-lora";
   constexpr const char* kFileName = "squeakfix_v3.safetensors";
   const std::string url = gary::HuggingFaceResolveUrl(kRepository, kFileName);
-  const std::string destination = (fs::path(directory) / kFileName).string();
+  const std::string destination = gary::PathToUtf8(gary::PathFromUtf8(directory) / kFileName);
   const long long expected = gary::HttpContentLength(url);
   long long local = static_cast<long long>(gary::FileSizeBytes(destination));
   if (expected > 0 && local > expected)
   {
-    std::remove(destination.c_str());
+    gary::RemoveFile(destination);
     local = 0;
   }
 
@@ -1363,7 +1632,7 @@ void SA3ReaperExtension::DecoderLoraDownloadWorkerMain()
 
   if (expected > 0 && static_cast<long long>(gary::FileSizeBytes(destination)) != expected)
   {
-    std::remove(destination.c_str());
+    gary::RemoveFile(destination);
     SetDecoderDownloadStatus("decoder download was incomplete; retry");
     finish();
     return;
@@ -1475,20 +1744,26 @@ void SA3ReaperExtension::ReloadCreativeLoras()
   {
     CreativeLora lora;
     lora.path = saved.path;
-    lora.name = std::filesystem::path(saved.path).stem().string();
+    lora.name = gary::PathToUtf8(gary::PathFromUtf8(saved.path).stem());
     if (lora.name.empty())
       lora.name = FileNameOnly(saved.path);
     if (gary::FileSizeBytes(saved.path) == 0)
       lora.name += " (missing)";
     lora.strength = saved.strength;
-    lora.enabled = saved.enabled;
     restored.push_back(std::move(lora));
   }
+  const bool countChanged = restored.size() != mCreativeLoras.size();
   mCreativeLoras = std::move(restored);
+  if (countChanged && mAutomationOn)
+    SyncLanesToCreativeLoras();
 
   if (IGraphics* ui = GetUI())
   {
+    if (countChanged && ui->NControls())
+      ApplyResponsiveLayout(ui);
     if (IControl* control = ui->GetControlWithTag(kCtrlTagCreativeLoras))
+      control->SetDirty(false);
+    if (IControl* control = ui->GetControlWithTag(kCtrlTagAutomation))
       control->SetDirty(false);
   }
 }
@@ -1499,7 +1774,7 @@ void SA3ReaperExtension::PersistCreativeLoras()
   savedLoras.reserve(mCreativeLoras.size());
   for (const auto& lora : mCreativeLoras)
   {
-    savedLoras.push_back({lora.path, lora.strength, lora.enabled});
+    savedLoras.push_back({lora.path, lora.strength});
   }
   if (!gary::SaveCreativeLoraRegistry(mModelVariant, savedLoras))
     mPanelStatus = "Could not persist the creative LoRA settings.";
@@ -1526,12 +1801,14 @@ void SA3ReaperExtension::AddCreativeLora()
 
   CreativeLora lora;
   lora.path = imported.path;
-  lora.name = imported.name.empty() ? std::filesystem::path(imported.path).stem().string() : imported.name;
-  lora.strength = 1.f;
-  lora.enabled = true;
+  lora.name = imported.name.empty() ? gary::PathToUtf8(gary::PathFromUtf8(imported.path).stem()) : imported.name;
+  lora.strength = 0.f;
   mCreativeLoras.push_back(std::move(lora));
   PersistCreativeLoras();
   mPanelStatus = "LoRA imported into the " + mModelVariant + " registry: " + mCreativeLoras.back().name + ".";
+  if (mAutomationOn)
+    SyncLanesToCreativeLoras();
+  ApplyResponsiveLayout(ui);
   RefreshPanel(true);
 }
 
@@ -1540,19 +1817,16 @@ void SA3ReaperExtension::RemoveCreativeLora(size_t index)
   if (index >= mCreativeLoras.size())
     return;
   const std::string name = mCreativeLoras[index].name;
+  const int laneIndex = LaneIndexFor(mCreativeLoras[index].path);
+  if (laneIndex >= 0)
+  {
+    mLanes.erase(mLanes.begin() + laneIndex);
+    MarkProjectDirty(nullptr);
+  }
   mCreativeLoras.erase(mCreativeLoras.begin() + static_cast<ptrdiff_t>(index));
   PersistCreativeLoras();
   mPanelStatus = "Removed LoRA from the render list: " + name + ".";
-  RefreshPanel(true);
-}
-
-void SA3ReaperExtension::ToggleCreativeLora(size_t index)
-{
-  if (index >= mCreativeLoras.size())
-    return;
-  mCreativeLoras[index].enabled = !mCreativeLoras[index].enabled;
-  PersistCreativeLoras();
-  mPanelStatus = mCreativeLoras[index].name + (mCreativeLoras[index].enabled ? " enabled." : " disabled.");
+  ApplyResponsiveLayout(GetUI());
   RefreshPanel(true);
 }
 
@@ -1575,6 +1849,32 @@ void SA3ReaperExtension::SaveProjectState(ProjectStateContext* context)
                    std::clamp(mDistShift, 0, 3), mContinueSeconds, mUseSeed ? 1 : 0,
                    static_cast<long long>(mSeedValue), mHasLastSeed ? 1 : 0,
                    static_cast<long long>(mLastSeed));
+  context->AddLine("SA3_REAPER_MUSICAL_OPTIONS %d %d %d %d", std::clamp(mKeyRoot, 0, 12), mKeyMode ? 1 : 0,
+                   mGenerateKeepsGoing ? 1 : 0, mContinueKeepsGoing ? 1 : 0);
+  context->AddLine("SA3_REAPER_AUTOMATION_ON %d", mAutomationOn ? 1 : 0);
+  context->AddLine("SA3_REAPER_LANE_BLEND %d", mLaneBlend == gary::SA3LaneBlend::Distinct ? 1 : 0);
+  context->AddLine("SA3_REAPER_LANE_SNAP %d", static_cast<int>(mLaneSnap));
+  for (const auto& lane : mLanes)
+  {
+    const std::string path = HexEncode(lane.path);
+    const std::string prompt = HexEncode(lane.prompt);
+    context->AddLine("SA3_REAPER_AUTOMATION_LANE %s %s", path.empty() ? "-" : path.c_str(),
+                     prompt.empty() ? "-" : prompt.c_str());
+    // Freehand curves get long, so points go over several lines. Thinned to what loading accepts.
+    const std::vector<gary::SA3LanePoint> points = gary::SimplifyLanePoints(lane.points);
+    constexpr size_t kPointsPerLine = 32;
+    for (size_t first = 0; first < points.size(); first += kPointsPerLine)
+    {
+      std::string line = "SA3_REAPER_AUTOMATION_LANE_POINTS";
+      char point[48] = {};
+      for (size_t i = first; i < std::min(first + kPointsPerLine, points.size()); ++i)
+      {
+        std::snprintf(point, sizeof(point), " %.5f %.4f", points[i].position, points[i].amount);
+        line += point;
+      }
+      context->AddLine("%s", line.c_str());
+    }
+  }
 }
 
 bool SA3ReaperExtension::LoadProjectStateLine(const char* line)
@@ -1634,6 +1934,104 @@ bool SA3ReaperExtension::LoadProjectStateLine(const char* line)
     }
     return true;
   }
+
+  constexpr const char* musicalPrefix = "SA3_REAPER_MUSICAL_OPTIONS ";
+  if (std::strncmp(line, musicalPrefix, std::strlen(musicalPrefix)) == 0)
+  {
+    int keyRoot = 0;
+    int keyMode = 0;
+    int generateKeepsGoing = 0;
+    int continueKeepsGoing = 1;
+    if (std::sscanf(line + std::strlen(musicalPrefix), "%d %d %d %d",
+                    &keyRoot, &keyMode, &generateKeepsGoing, &continueKeepsGoing) == 4)
+    {
+      mKeyRoot = std::clamp(keyRoot, 0, 12);
+      mKeyMode = keyMode ? 1 : 0;
+      mGenerateKeepsGoing = generateKeepsGoing != 0;
+      mContinueKeepsGoing = continueKeepsGoing != 0;
+      if (IGraphics* ui = GetUI())
+        if (IControl* control = ui->GetControlWithTag(kCtrlTagRenderOptions))
+          control->SetDirty(false);
+    }
+    return true;
+  }
+
+  const auto refreshLanes = [this]() {
+    if (IGraphics* ui = GetUI())
+      if (IControl* control = ui->GetControlWithTag(kCtrlTagAutomation))
+        control->As<gary::ui::SA3LaneEditorControl>()->LanesReplaced();
+  };
+
+  constexpr const char* automationPrefix = "SA3_REAPER_AUTOMATION_ON ";
+  if (std::strncmp(line, automationPrefix, std::strlen(automationPrefix)) == 0)
+  {
+    mAutomationOn = std::atoi(line + std::strlen(automationPrefix)) == 1;
+    ApplyResponsiveLayout(GetUI());
+    return true;
+  }
+
+  constexpr const char* blendPrefix = "SA3_REAPER_LANE_BLEND ";
+  if (std::strncmp(line, blendPrefix, std::strlen(blendPrefix)) == 0)
+  {
+    mLaneBlend = std::atoi(line + std::strlen(blendPrefix)) == 1 ? gary::SA3LaneBlend::Distinct
+                                                                 : gary::SA3LaneBlend::OneSong;
+    refreshLanes();
+    return true;
+  }
+
+  constexpr const char* snapPrefix = "SA3_REAPER_LANE_SNAP ";
+  if (std::strncmp(line, snapPrefix, std::strlen(snapPrefix)) == 0)
+  {
+    mLaneSnap = gary::LaneSnapFromIndex(std::atoi(line + std::strlen(snapPrefix)));
+    refreshLanes();
+    return true;
+  }
+
+  constexpr const char* pointsPrefix = "SA3_REAPER_AUTOMATION_LANE_POINTS ";
+  if (std::strncmp(line, pointsPrefix, std::strlen(pointsPrefix)) == 0)
+  {
+    if (mLanes.empty())
+      return true;
+    const char* cursor = line + std::strlen(pointsPrefix);
+    char* end = nullptr;
+    auto& points = mLanes.back().points;
+    while (points.size() < gary::kSA3MaxLanePoints)
+    {
+      const float position = std::strtof(cursor, &end);
+      if (end == cursor)
+        break;
+      cursor = end;
+      const float amount = std::strtof(cursor, &end);
+      if (end == cursor)
+        break;
+      cursor = end;
+      if (std::isfinite(position) && std::isfinite(amount))
+        points.push_back({std::clamp(position, 0.f, 1.f), std::clamp(amount, 0.f, gary::kSA3MaxLaneAmount)});
+    }
+    gary::SortLanePoints(points);
+    refreshLanes();
+    return true;
+  }
+
+  constexpr const char* lanePrefix = "SA3_REAPER_AUTOMATION_LANE ";
+  if (std::strncmp(line, lanePrefix, std::strlen(lanePrefix)) == 0)
+  {
+    if (mLanes.size() >= gary::kSA3MaxLanes)
+      return true;
+    char pathText[4096] = {};
+    char promptText[4096] = {};
+    if (std::sscanf(line + std::strlen(lanePrefix), "%4095s %4095s", pathText, promptText) != 2)
+      return true;
+    gary::SA3Lane lane;
+    if (std::strcmp(pathText, "-") != 0 && !HexDecode(pathText, lane.path))
+      return true;
+    if (std::strcmp(promptText, "-") != 0 && !HexDecode(promptText, lane.prompt))
+      return true;
+    lane.name = gary::PathToUtf8(gary::PathFromUtf8(lane.path).stem());
+    mLanes.push_back(std::move(lane));
+    refreshLanes();
+    return true;
+  }
   return false;
 }
 
@@ -1641,9 +2039,27 @@ void SA3ReaperExtension::OnBeginLoadProjectState(bool)
 {
   mRenderService.Cancel();
   mPendingGeneration = {};
+  mLanes.clear();
+  mLaneBlend = gary::SA3LaneBlend::OneSong;
+  mLaneSnap = gary::SA3LaneSnap::Off;
+  mAutomationOn = false;
+  ApplyResponsiveLayout(GetUI());
+  if (IGraphics* ui = GetUI())
+  {
+    if (IControl* control = ui->GetControlWithTag(kCtrlTagAutomation))
+    {
+      auto* editor = control->As<gary::ui::SA3LaneEditorControl>();
+      editor->LanesReplaced();
+      editor->SetBackdrop({});
+    }
+  }
   mPrompt.clear();
   mDistShift = 0;
   mContinueSeconds = 0.0;
+  mKeyRoot = 0;
+  mKeyMode = 0;
+  mGenerateKeepsGoing = false;
+  mContinueKeepsGoing = true;
   mUseSeed = false;
   mSeedValue = 0;
   mHasLastSeed = false;
@@ -1740,6 +2156,7 @@ void SA3ReaperExtension::SelectOperation(Operation operation)
   }
   if (*GetWindowTogglePtr() == 0)
     ShowHideMainWindow();
+  ApplyResponsiveLayout(GetUI());
   RefreshPanel(true);
 }
 
@@ -1846,6 +2263,10 @@ void SA3ReaperExtension::StartOrCancelRender()
   auto request = gary::LoadSharedRenderRequest(mPrompt, renderDuration, selection.bpm, renderOperation);
   request.distShift = std::clamp(mDistShift, 0, 3);
   request.seed = mUseSeed ? std::max<int64_t>(0, mSeedValue) : -1;
+  request.generationTailSeconds = mGenerateKeepsGoing ? gary::kSA3KeepsGoingTailSeconds : gary::kSA3EndsHereTailSeconds;
+  request.continuationTailSeconds = mContinueKeepsGoing ? gary::kSA3KeepsGoingTailSeconds : gary::kSA3EndsHereTailSeconds;
+  const std::string keyScale = gary::KeyScaleText(mKeyRoot, mKeyMode);
+  request.prompt = gary::PromptWithKeyScale(std::move(request.prompt), keyScale);
   if (sourceTake)
   {
     std::string captureError;
@@ -1856,6 +2277,11 @@ void SA3ReaperExtension::StartOrCancelRender()
       return;
     }
   }
+  // Continue's time 0 is the start of the source, while its curves are drawn over the added part.
+  const double laneTimelineStart = mOperation == Operation::Continue ? sourceEnd - start : 0.0;
+  if (mAutomationOn && !mLanes.empty())
+    gary::AddLanesToRequest(request, mLanes, mLaneBlend, LaneSources(), selection.bpm, keyScale,
+                            laneTimelineStart, renderDuration);
   std::string validationError;
   if (!gary::ValidateRenderRequest(request, validationError))
   {
@@ -1869,6 +2295,10 @@ void SA3ReaperExtension::StartOrCancelRender()
   mPendingGeneration.start = start;
   mPendingGeneration.end = mOperation == Operation::Continue ? sourceEnd + renderDuration : sourceEnd;
   mPendingGeneration.prompt = mPrompt;
+  mPendingGeneration.laneTimelineStart = laneTimelineStart;
+  mLastRenderUsedLanes = !request.lanes.empty();
+  if (mOperation == Operation::Transform)
+    SetLaneBackdrop(request.sourceAudio, 0.0);
   if (!mRenderService.StartRender(std::move(request)))
   {
     mPendingGeneration = {};
@@ -1904,6 +2334,7 @@ void SA3ReaperExtension::FinishGeneration(gary::SA3RenderResult result)
   }
   mLastSeed = std::max<int64_t>(0, result.seed);
   mHasLastSeed = true;
+  SetLaneBackdrop(result.audio, pending.laneTimelineStart);
   MarkProjectDirty(nullptr);
   if (IGraphics* ui = GetUI())
     if (IControl* control = ui->GetControlWithTag(kCtrlTagRenderOptions))
@@ -2130,7 +2561,7 @@ std::string SA3ReaperExtension::MakeUniqueOutputPath(Operation operation, std::s
     return {};
 
   std::error_code ec;
-  const std::filesystem::path directory = std::filesystem::path(documents) / "reaper_audio";
+  const std::filesystem::path directory = gary::PathFromUtf8(documents) / "reaper_audio";
   std::filesystem::create_directories(directory, ec);
   if (ec)
   {
@@ -2148,7 +2579,7 @@ std::string SA3ReaperExtension::MakeUniqueOutputPath(Operation operation, std::s
     const std::string name = stem + (suffix == 0 ? "" : "-" + std::to_string(suffix)) + ".wav";
     const std::filesystem::path candidate = directory / name;
     if (!std::filesystem::exists(candidate, ec))
-      return candidate.string();
+      return gary::PathToUtf8(candidate);
   }
   error = "could not allocate a unique generated-audio filename";
   return {};
@@ -2178,17 +2609,22 @@ void SA3ReaperExtension::RollPrompt()
     if (!prompt.empty() && std::find(prompts.begin(), prompts.end(), prompt) == prompts.end())
       prompts.push_back(prompt);
   };
-  for (const auto& lora : mCreativeLoras)
+  // The default prompts, plus the pool of every LoRA in use. With automation on, each lane rolls its
+  // LoRA's prompts with its own dice, so this one stays on the defaults.
+  for (const auto& prompt : gary::LoadDefaultPromptPool())
+    appendUnique(prompt);
+  const size_t defaultCount = prompts.size();
+  if (!mAutomationOn)
   {
-    if (!lora.enabled || lora.strength <= 0.f)
-      continue;
-    for (const auto& prompt : gary::LoadPromptPoolForLora(lora.path, lora.name))
-      appendUnique(prompt);
+    for (const auto& lora : mCreativeLoras)
+    {
+      if (lora.strength <= 0.f)
+        continue;
+      for (const auto& prompt : gary::LoadPromptPoolForLora(lora.path, lora.name))
+        appendUnique(prompt);
+    }
   }
-  const bool usingLoraPrompts = !prompts.empty();
-  if (!usingLoraPrompts)
-    for (const auto& prompt : gary::LoadDefaultPromptPool())
-      appendUnique(prompt);
+  const bool usingLoraPrompts = prompts.size() > defaultCount;
   if (prompts.empty())
   {
     mPanelStatus = "Prompt pool is empty.";
@@ -2211,7 +2647,7 @@ void SA3ReaperExtension::RollPrompt()
       }
     }
   }
-  mPanelStatus = usingLoraPrompts ? "Rolled a prompt from the active LoRA pool."
+  mPanelStatus = usingLoraPrompts ? "Rolled from the default and active LoRA prompts."
                                   : "Rolled a default prompt.";
   MarkProjectDirty(nullptr);
   RefreshPanel(true);
@@ -2244,6 +2680,33 @@ void SA3ReaperExtension::SetSeedValue(int64_t seed)
 void SA3ReaperExtension::SetContinueSeconds(double seconds)
 {
   mContinueSeconds = std::clamp(seconds, 1.0, 300.0);
+  MarkProjectDirty(nullptr);
+  RefreshPanel(true);
+}
+
+void SA3ReaperExtension::SetKeyRoot(int root)
+{
+  mKeyRoot = std::clamp(root, 0, 12);
+  MarkProjectDirty(nullptr);
+  RefreshPanel(true);
+}
+
+void SA3ReaperExtension::SetKeyMode(int mode)
+{
+  mKeyMode = mode ? 1 : 0;
+  MarkProjectDirty(nullptr);
+  RefreshPanel(true);
+}
+
+bool SA3ReaperExtension::EndingKeepsGoing() const
+{
+  return mOperation == Operation::Continue ? mContinueKeepsGoing : mGenerateKeepsGoing;
+}
+
+void SA3ReaperExtension::SetEndingKeepsGoing(bool keepsGoing)
+{
+  (mOperation == Operation::Continue ? mContinueKeepsGoing : mGenerateKeepsGoing) = keepsGoing;
+  mPanelStatus = keepsGoing ? gary::kSA3KeepsGoingHint : gary::kSA3EndsHereHint;
   MarkProjectDirty(nullptr);
   RefreshPanel(true);
 }
@@ -2368,6 +2831,10 @@ void SA3ReaperExtension::RefreshPanel(bool force)
   SetTaggedText(kCtrlTagSelection, selectionText.c_str());
   SetTaggedText(kCtrlTagTiming, timingText);
   SetTaggedText(kCtrlTagHint, statusText.c_str());
+
+  if (IControl* control = ui->GetControlWithTag(kCtrlTagAutomation))
+    control->As<gary::ui::SA3LaneEditorControl>()->SetTimeline(LaneTimelineSeconds(), current.bpm,
+                                                               current.beatsPerMeasure);
 
   if (IControl* control = ui->GetControlWithTag(kCtrlTagTransform))
     control->As<SA3TabControl>()->SetActive(mOperation == Operation::Transform);

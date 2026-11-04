@@ -1,5 +1,7 @@
 #include "SA3RenderService.h"
 
+#include "prompt_pool.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -17,6 +19,11 @@
 
 #ifndef SA3_DEMO_DEFAULT_MODELS_DIR
 #define SA3_DEMO_DEFAULT_MODELS_DIR "models"
+#endif
+
+// Where the libsa3 runtime sits relative to this module. Empty means right beside it.
+#ifndef SA3_RUNTIME_SUBDIR
+#define SA3_RUNTIME_SUBDIR ""
 #endif
 
 namespace gary
@@ -100,7 +107,7 @@ struct Sa3Api
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             reinterpret_cast<LPCWSTR>(&SharedSa3Api), &self))
     {
-      error = "could not locate the REAPER extension module";
+      error = "could not locate this module";
       return false;
     }
 
@@ -113,7 +120,7 @@ struct Sa3Api
     }
     if (length == 0)
     {
-      error = "could not read the REAPER extension path";
+      error = "could not read this module's path";
       return false;
     }
 
@@ -121,17 +128,23 @@ struct Sa3Api
     const size_t slash = dllPath.find_last_of(L"\\/");
     if (slash == std::wstring::npos)
     {
-      error = "could not derive the REAPER extension directory";
+      error = "could not derive this module's directory";
       return false;
     }
     dllPath.resize(slash + 1);
-    dllPath += L"SA3ReaperExtension\\sa3.dll";
+    const std::string subdir = SA3_RUNTIME_SUBDIR;
+    if (!subdir.empty())
+    {
+      dllPath.append(subdir.begin(), subdir.end());
+      dllPath += L'\\';
+    }
+    dllPath += L"sa3.dll";
 
     module = LoadLibraryExW(dllPath.c_str(), nullptr,
                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!module)
     {
-      error = "could not load SA3ReaperExtension/sa3.dll (win32 "
+      error = "could not load " + subdir + (subdir.empty() ? "" : "/") + "sa3.dll (win32 "
             + std::to_string(GetLastError()) + ")";
       return false;
     }
@@ -149,23 +162,26 @@ struct Sa3Api
     Dl_info info = {};
     if (dladdr(reinterpret_cast<const void*>(&SharedSa3Api), &info) == 0 || !info.dli_fname)
     {
-      error = "could not locate the REAPER extension module";
+      error = "could not locate this module";
       return false;
     }
     std::string dllPath(info.dli_fname);
     const size_t slash = dllPath.find_last_of('/');
     if (slash == std::string::npos)
     {
-      error = "could not derive the REAPER extension directory";
+      error = "could not derive this module's directory";
       return false;
     }
     dllPath.resize(slash + 1);
-    dllPath += "SA3ReaperExtension/libsa3.dylib";
+    const std::string subdir = SA3_RUNTIME_SUBDIR;
+    if (!subdir.empty())
+      dllPath += subdir + "/";
+    dllPath += "libsa3.dylib";
     module = dlopen(dllPath.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!module)
     {
       const char* detail = dlerror();
-      error = "could not load SA3ReaperExtension/libsa3.dylib";
+      error = "could not load " + dllPath;
       if (detail) error += std::string(": ") + detail;
       return false;
     }
@@ -245,12 +261,11 @@ SA3RenderRequest LoadSharedRenderRequest(std::string prompt,
   request.bpm = bpm;
 
   const std::string savedModelsDir = LoadSetting("models_dir");
+  const std::string envModels = EnvironmentPath("SA3_MODELS_DIR");
   if (!savedModelsDir.empty())
     request.modelsDir = savedModelsDir;
-  else if (const char* envModels = std::getenv("SA3_MODELS_DIR"))
-    request.modelsDir = *envModels ? envModels : SA3_DEMO_DEFAULT_MODELS_DIR;
   else
-    request.modelsDir = SA3_DEMO_DEFAULT_MODELS_DIR;
+    request.modelsDir = !envModels.empty() ? envModels : SA3_DEMO_DEFAULT_MODELS_DIR;
 
   const std::string savedVariant = LoadSetting("variant");
   request.variant = (savedVariant == "small-music" || savedVariant == "small-sfx") ? "small-music" : "medium";
@@ -264,7 +279,7 @@ SA3RenderRequest LoadSharedRenderRequest(std::string prompt,
   const auto creativeLoras = LoadCreativeLoraRegistry(request.variant);
   for (const auto& lora : creativeLoras)
   {
-    if (lora.enabled && !lora.path.empty() && FileSizeBytes(lora.path) > 0)
+    if (lora.strength > 0.f && !lora.path.empty() && FileSizeBytes(lora.path) > 0)
       request.loras.push_back({lora.path, lora.strength});
   }
 
@@ -275,13 +290,134 @@ SA3RenderRequest LoadSharedRenderRequest(std::string prompt,
       request.loras.push_back({decoderPath, 1.f});
   }
 
-  if (bpm > 0.0)
-  {
-    if (!prompt.empty()) prompt += ' ';
-    prompt += std::to_string(static_cast<int>(std::llround(bpm))) + " bpm";
-  }
-  request.prompt = std::move(prompt);
+  request.prompt = PromptWithTempo(std::move(prompt), bpm);
   return request;
+}
+
+std::string PromptWithTempo(std::string prompt, double bpm)
+{
+  if (bpm <= 0.0)
+    return prompt;
+  prompt = sa3::strip_prompt_bpm(prompt);
+  if (!prompt.empty()) prompt += ' ';
+  prompt += std::to_string(static_cast<int>(std::llround(bpm))) + " bpm";
+  return prompt;
+}
+
+bool AdapterSupportsLanes(const std::string& path)
+{
+  std::string error;
+  const Sa3Api* sa3 = LoadSa3Api(error);
+  if (!sa3 || !sa3->api->adapter_info)
+    return true;
+  sa3_adapter_info_v1 info = {};
+  info.size = sizeof(info);
+  sa3_error_v1 readError = {};
+  readError.size = sizeof(readError);
+  sa3->api->error_init(&readError);
+  return sa3->api->adapter_info(path.c_str(), &info, &readError) != SA3_STATUS_OK_V1 || info.supports_lanes != 0;
+}
+
+std::string SyncLanes(std::vector<SA3Lane>& lanes, const std::vector<SA3LaneSource>& sources)
+{
+  const auto isMissing = [&sources](const std::string& path) {
+    return std::none_of(sources.begin(), sources.end(),
+                        [&path](const SA3LaneSource& source) { return source.path == path; });
+  };
+
+  std::vector<SA3Lane> synced;
+  std::string unsupported;
+  for (const SA3LaneSource& source : sources)
+  {
+    const auto existing = std::find_if(lanes.begin(), lanes.end(),
+                                       [&source](const SA3Lane& lane) { return lane.path == source.path; });
+    if (existing != lanes.end())
+    {
+      synced.push_back(std::move(*existing));
+      existing->path.clear();
+      continue;
+    }
+    if (synced.size() >= kSA3MaxLanes)
+      continue;
+    if (!AdapterSupportsLanes(source.path))
+    {
+      unsupported = source.name;
+      continue;
+    }
+    // Starts flat at the slider's value, so a new lane changes nothing until you draw.
+    SA3Lane lane;
+    lane.name = source.name;
+    lane.path = source.path;
+    lane.points = {{0.f, source.strength}, {1.f, source.strength}};
+    synced.push_back(std::move(lane));
+  }
+  // Kept so a project reopened on another model family doesn't lose its curves.
+  for (SA3Lane& lane : lanes)
+    if (!lane.path.empty() && isMissing(lane.path) && synced.size() < kSA3MaxLanes)
+      synced.push_back(std::move(lane));
+  lanes = std::move(synced);
+  return unsupported;
+}
+
+void AddLanesToRequest(SA3RenderRequest& request, const std::vector<SA3Lane>& lanes, SA3LaneBlend blend,
+                       const std::vector<SA3LaneSource>& sources, double promptBpm, const std::string& keyScale,
+                       double timelineStartSeconds, double timelineSeconds)
+{
+  const SA3LaneBlendSettings settings = LaneBlendSettings(blend);
+  request.laneIsolation = settings.isolation;
+  request.laneIsolationUntil = settings.isolationUntil;
+  request.laneAverageUntil = settings.averageUntil;
+  for (const SA3Lane& lane : lanes)
+  {
+    if (std::none_of(sources.begin(), sources.end(),
+                     [&lane](const SA3LaneSource& source) { return source.path == lane.path; }))
+      continue;
+    // A lane replaces the LoRA's fixed strength, which would otherwise run in every pass too.
+    request.loras.erase(std::remove_if(request.loras.begin(), request.loras.end(),
+                                       [&lane](const SA3LoraSetting& lora) { return lora.path == lane.path; }),
+                        request.loras.end());
+    // A curve that stays at 0 has nothing to add, and sending it would still encode its prompt.
+    if (std::none_of(lane.points.begin(), lane.points.end(),
+                     [](const SA3LanePoint& point) { return point.amount > 0.f; }))
+      continue;
+    SA3LaneSetting setting;
+    setting.loraPath = lane.path;
+    setting.prompt = lane.prompt.empty() ? std::string()
+      : PromptWithKeyScale(PromptWithTempo(lane.prompt, promptBpm), keyScale);
+    setting.envelope = LaneEnvelopeSeconds(lane.points, timelineStartSeconds, timelineSeconds);
+    request.lanes.push_back(std::move(setting));
+  }
+}
+
+std::vector<float> WaveformPeaks(const RecordingSnapshot& audio, double startSeconds, size_t columns)
+{
+  std::vector<float> peaks;
+  if (audio.channels.empty() || audio.numSamples <= 0 || audio.sampleRate <= 0)
+    return peaks;
+  const int first = std::clamp(static_cast<int>(startSeconds * audio.sampleRate), 0, audio.numSamples);
+  const int count = audio.numSamples - first;
+  if (count <= 0)
+    return peaks;
+  peaks.assign(columns * 2, 0.f);
+  for (size_t column = 0; column < columns; ++column)
+  {
+    const int from = first + static_cast<int>(static_cast<int64_t>(count) * column / columns);
+    const int to = first + static_cast<int>(static_cast<int64_t>(count) * (column + 1) / columns);
+    float low = 0.f;
+    float high = 0.f;
+    for (const auto& channel : audio.channels)
+    {
+      const int end = std::min(to, static_cast<int>(channel.size()));
+      for (int s = from; s < end; ++s)
+      {
+        low = std::min(low, channel[static_cast<size_t>(s)]);
+        high = std::max(high, channel[static_cast<size_t>(s)]);
+      }
+    }
+    peaks[column * 2] = std::clamp(low, -1.f, 1.f);
+    peaks[column * 2 + 1] = std::clamp(high, -1.f, 1.f);
+  }
+  return peaks;
 }
 
 bool ValidateRenderRequest(const SA3RenderRequest& request, std::string& error)
@@ -486,6 +622,8 @@ void SA3RenderService::WorkerMain(uint64_t requestId, SA3RenderRequest request)
   generation.input_audio.n_channels = hasSource ? static_cast<uint32_t>(request.sourceAudio.channels.size()) : 0;
   generation.input_audio.sample_rate = hasSource ? static_cast<uint32_t>(request.sourceAudio.sampleRate) : 0;
   generation.transform_noise_level = std::clamp(request.initNoiseLevel, 0.f, 1.f);
+  generation.generation_tail_padding_seconds = request.generationTailSeconds;
+  generation.continuation_tail_padding_seconds = request.continuationTailSeconds;
 
   std::vector<sa3_adapter_v1> adapters;
   adapters.reserve(request.loras.size());
@@ -500,6 +638,43 @@ void SA3RenderService::WorkerMain(uint64_t requestId, SA3RenderRequest request)
   }
   generation.adapters = adapters.empty() ? nullptr : adapters.data();
   generation.adapter_count = static_cast<uint32_t>(adapters.size());
+
+  std::vector<sa3_adapter_v1> laneAdapters(request.lanes.size());
+  std::vector<sa3_lane_v1> lanes(request.lanes.size());
+  if (!request.lanes.empty())
+  {
+    if (!sa3->api->lane_init)
+    {
+      PublishResult({false, false, "this libsa3 predates automation lanes"}, "libsa3 too old");
+      return;
+    }
+    for (size_t i = 0; i < request.lanes.size(); ++i)
+    {
+      const SA3LaneSetting& setting = request.lanes[i];
+      sa3_lane_v1& lane = lanes[i];
+      lane.size = sizeof(lane);
+      sa3->api->lane_init(&lane);
+      if (!setting.loraPath.empty())
+      {
+        sa3_adapter_v1& adapter = laneAdapters[i];
+        adapter.size = sizeof(adapter);
+        sa3->api->adapter_init(&adapter);
+        adapter.path_or_name = setting.loraPath.c_str();
+        lane.adapters = &adapter;
+        lane.adapter_count = 1;
+      }
+      lane.envelope = setting.envelope.data();
+      lane.envelope_point_count = static_cast<uint32_t>(setting.envelope.size() / 2);
+      lane.prompt = setting.prompt.empty() ? nullptr : setting.prompt.c_str();
+    }
+    generation.lanes = lanes.data();
+    generation.lane_count = static_cast<uint32_t>(lanes.size());
+    generation.lane_isolation = request.laneIsolation;
+    generation.lane_isolation_until = request.laneIsolationUntil;
+    generation.lane_average_until = request.laneAverageUntil;
+    // On 8 GB, the DiT, every lane's adapters and the decoder together oversubscribe VRAM.
+    generation.residency = SA3_RESIDENCY_FRUGAL_V1;
+  }
 
   struct ProgressContext
   {
