@@ -51,8 +51,7 @@ if(WIN32)
 endif()
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
-  SA3_DEMO_DEFAULT_MODELS_DIR="${SA3_CPP_DIR}/models"
-  SA3_DEMO_SA3_CPP_DIR="${SA3_CPP_DIR}"
+  ${SA3_DEMO_PATH_DEFINES}
   SA3_RUNTIME_SUBDIR="SA3ReaperExtension"
 )
 
