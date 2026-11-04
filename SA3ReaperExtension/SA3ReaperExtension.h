@@ -127,6 +127,7 @@ private:
   int LaneIndexFor(const std::string& path) const;
   bool LaneMissing(const std::string& path) const;
 
+  bool ModelsReady() const;
   void ReloadSharedSettings(bool scanModels = true);
   void ChooseModelsFolder();
   void SelectModelVariant(const char* variant);

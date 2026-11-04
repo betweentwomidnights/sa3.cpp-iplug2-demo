@@ -703,8 +703,7 @@ private:
   {
     g.DrawText(IText(13.f, COLOR_WHITE, gary::ui::FontName, EAlign::Near, EVAlign::Middle),
                "generation model", IRECT(card.L + 10.f, card.T + 4.f, card.L + 126.f, card.T + 24.f));
-    const bool ready = mOwner.mModelVariant == "medium" ? mOwner.mMediumModelsAvailable
-                                                         : mOwner.mSmallModelsAvailable;
+    const bool ready = mOwner.ModelsReady();
     const std::string folder = FileNameOnly(mOwner.mModelsDir);
     const std::string detail = (ready ? "ready" : "missing") + (folder.empty() ? "" : "  /  " + folder);
     g.DrawText(IText(10.f, ready ? gary::ui::Green() : gary::ui::TextDim(), gary::ui::FontName,
@@ -1185,6 +1184,7 @@ void SA3ReaperExtension::OnIdle()
     mRenderService.ReleaseModels();
   ContinuePendingPeakBuilds();
 
+  const bool modelsWereReady = ModelsReady();
   const uint64_t decoderRevision = mDecoderDownloadRevision.load(std::memory_order_acquire);
   const bool decoderFinished = decoderRevision != mSeenDecoderDownloadRevision;
   if (decoderFinished)
@@ -1200,7 +1200,8 @@ void SA3ReaperExtension::OnIdle()
   }
 
   RefreshPanel(completed || decoderFinished || mRenderService.Busy()
-               || mDecoderDownloadBusy.load(std::memory_order_acquire));
+               || mDecoderDownloadBusy.load(std::memory_order_acquire)
+               || ModelsReady() != modelsWereReady);
   UpdateLanePlayhead();
 }
 
@@ -1278,7 +1279,7 @@ void SA3ReaperExtension::ApplyResponsiveLayout(IGraphics* graphics)
   place(kCtrlTagRun, lanesPage ? IRECT(main.L, main.B - 32.f, main.R, main.B)
                                : IRECT(main.L, listBottom + 6.f, main.R, listBottom + 38.f),
         showMain || lanesPage);
-  place(kCtrlTagHint, IRECT(main.L, std::max(listBottom + 44.f, main.B - 42.f), main.R, main.B), showMain);
+  place(kCtrlTagHint, IRECT(main.L, listBottom + 44.f, main.R, main.B), showMain);
   place(kCtrlTagSettings, side, showSettings);
   place(kCtrlTagAutomation, lanesPage ? IRECT(side.L, main.T + 86.f, side.R, options.T - 6.f) : side, showLanes);
 
@@ -1397,6 +1398,11 @@ bool SA3ReaperExtension::LaneMissing(const std::string& path) const
 {
   return std::none_of(mCreativeLoras.begin(), mCreativeLoras.end(),
                       [&](const CreativeLora& lora) { return lora.path == path; });
+}
+
+bool SA3ReaperExtension::ModelsReady() const
+{
+  return mModelVariant == "medium" ? mMediumModelsAvailable : mSmallModelsAvailable;
 }
 
 void SA3ReaperExtension::ReloadSharedSettings(bool scanModels)
@@ -2825,6 +2831,8 @@ void SA3ReaperExtension::RefreshPanel(bool force)
                   mRenderService.Status().c_str(), mRenderService.Progress() * 100.f);
     statusText = progress;
   }
+  else if (!ModelsReady())
+    statusText = "No " + mModelVariant + " models found. Open settings and click 'models folder' to choose yours.";
   else
     statusText = mPanelStatus;
 
@@ -2884,6 +2892,8 @@ void SA3ReaperExtension::RefreshPanel(bool force)
                               && sourceLength + continuationSeconds <= 300.0);
       }
     }
+    if (!mRenderService.Busy() && !ModelsReady())
+      runButton->SetEnabled(false);
   }
 }
 
