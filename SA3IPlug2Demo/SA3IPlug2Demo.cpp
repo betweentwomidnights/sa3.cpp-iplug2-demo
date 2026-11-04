@@ -29,7 +29,8 @@
 #include <random>
 #include <thread>
 
-// The build system (CMakeLists) always sets this from SA3_CPP_DIR; overridable at runtime with SA3_MODELS_DIR.
+// CMake sets this from SA3_CPP_DIR, or to "" (no folder yet) with SA3_EMBED_DEV_PATHS off; overridable at
+// runtime with SA3_MODELS_DIR.
 #ifndef SA3_DEMO_DEFAULT_MODELS_DIR
 #define SA3_DEMO_DEFAULT_MODELS_DIR "models"
 #endif

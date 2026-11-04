@@ -52,7 +52,8 @@ constexpr const char* kOutputUndoFileName = "myOutput.undo.wav";
 constexpr const char* kDraggedAudioFolderName = "dragged_audio";
 constexpr const char* kLoraFolderName = "loras";
 
-// The build system (CMakeLists) always sets this from SA3_CPP_DIR; this is only a no-CMake fallback.
+// CMake sets this to SA3_CPP_DIR, or to "" (no checkout) with SA3_EMBED_DEV_PATHS off; this is only a
+// no-CMake fallback.
 #ifndef SA3_DEMO_SA3_CPP_DIR
 #define SA3_DEMO_SA3_CPP_DIR "sa3.cpp"
 #endif
@@ -495,8 +496,11 @@ std::vector<std::string> LoadPromptPoolForLoraSource(const std::string& sourcePa
     AppendTxtPromptsFromDirectory(JoinPath(parent, stem.c_str()), prompts);
 
   const std::string sa3Root = Sa3CppDirectory();
-  AppendTxtPromptsFromDirectory(JoinPath(JoinPath(sa3Root, "loras"), stem.c_str()), prompts);
-  AppendJsonArrayStrings(JoinPath(JoinPath(sa3Root, "prompts"), (stem + ".json").c_str()), prompts);
+  if (!sa3Root.empty())
+  {
+    AppendTxtPromptsFromDirectory(JoinPath(JoinPath(sa3Root, "loras"), stem.c_str()), prompts);
+    AppendJsonArrayStrings(JoinPath(JoinPath(sa3Root, "prompts"), (stem + ".json").c_str()), prompts);
+  }
   return prompts;
 }
 
@@ -597,6 +601,11 @@ bool ConvertLoraToGguf(const std::string& exportedBase, const std::string& desti
     return false;
   }
   const std::string sa3Root = Sa3CppDirectory();
+  if (sa3Root.empty())
+  {
+    error = "converting this LoRA needs a current libsa3 beside the plug-in, or SA3_CPP_DIR set to a sa3.cpp checkout";
+    return false;
+  }
   const std::string script = JoinPath(JoinPath(sa3Root, "tools"), "convert_lora.py");
   if (!FileExists(script))
   {
@@ -1450,7 +1459,9 @@ AudioFileInfo ImportLoraFile(const std::string& path)
 std::vector<std::string> LoadDefaultPromptPool()
 {
   std::vector<std::string> prompts;
-  AppendJsonArrayStrings(JoinPath(JoinPath(Sa3CppDirectory(), "prompts"), "defaults.json"), prompts);
+  const std::string sa3Root = Sa3CppDirectory();
+  if (!sa3Root.empty())
+    AppendJsonArrayStrings(JoinPath(JoinPath(sa3Root, "prompts"), "defaults.json"), prompts);
   if (prompts.empty())
   {
     AddUniquePrompt(prompts, "warm analog synthwave with a hypnotic arpeggio");

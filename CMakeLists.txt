@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
+# Read by project(), so it has to be set before it. Left unset, CMake builds for the SDK's own macOS
+# version. Keep this equal to LSMinimumSystemVersion in SA3IPlug2Demo/resources/*-Info.plist and to the
+# sa3.cpp build's target (13.3 is what sa3.cpp's own Mac release uses).
+set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3" CACHE STRING "Minimum macOS version")
 project(SA3IPlug2DemoRepo VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -22,6 +26,16 @@ else()
 endif()
 set(SA3_CUDA_RUNTIME_DIR "${_SA3_CUDA_PATH}/bin" CACHE PATH "Optional CUDA runtime DLL directory")
 set(IPLUG_DEPLOY_PLUGINS OFF CACHE BOOL "Deploy built plugins to system directories" FORCE)
+
+# A dev build falls back to this machine's sa3.cpp checkout for models and prompts. Those paths mean
+# nothing on anyone else's machine and name the build account, so builds you ship turn this off: the
+# plugin then starts with no models folder and the user downloads or chooses one.
+option(SA3_EMBED_DEV_PATHS "Compile this machine's sa3.cpp folder in as the models and prompts fallback (off for release builds)" ON)
+if(SA3_EMBED_DEV_PATHS)
+  set(SA3_DEMO_PATH_DEFINES SA3_DEMO_DEFAULT_MODELS_DIR="${SA3_CPP_DIR}/models" SA3_DEMO_SA3_CPP_DIR="${SA3_CPP_DIR}")
+else()
+  set(SA3_DEMO_PATH_DEFINES SA3_DEMO_DEFAULT_MODELS_DIR="" SA3_DEMO_SA3_CPP_DIR="")
+endif()
 
 include("${IPLUG2_DIR}/iPlug2.cmake")
 find_package(iPlug2 REQUIRED)
