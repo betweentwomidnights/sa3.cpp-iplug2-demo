@@ -1,22 +1,22 @@
 # SA3 demo v0.5.0: M4 release build
 
-Build from demo `main` and sa3.cpp `main` at `9511bbe`, and update submodules
+Build from demo `main` and the sa3.cpp `v0.2.0` tag, and update submodules
 recursively. This is the private Metal runtime rather than the `build-metal` one
 used to check the branch, so use new build folders. Reusing an old one leaves
 stale ggml dylibs inside the bundles.
 
 ```sh
 cd ../sa3.cpp
-git fetch origin && git checkout 9511bbe && git submodule update --init --recursive
-cmake -S . -B build-plugin-metal-9511bbe -DCMAKE_BUILD_TYPE=Release \
+git fetch origin --tags && git checkout v0.2.0 && git submodule update --init --recursive
+cmake -S . -B build-plugin-metal-v020 -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_OSX_ARCHITECTURES=arm64 -DSA3_BUILD_SAT=ON -DSA3_METAL=ON \
   -DGGML_NATIVE=OFF -DSA3_PRIVATE_GGML=ON
-cmake --build build-plugin-metal-9511bbe --parallel 4
-ctest --test-dir build-plugin-metal-9511bbe --output-on-failure
+cmake --build build-plugin-metal-v020 --parallel 4
+ctest --test-dir build-plugin-metal-v020 --output-on-failure
 cd ../sa3.cpp-iplug2-demo # use your local checkout name
 git fetch origin && git checkout main && git pull && git submodule update --init --recursive
 cmake -S . -B build-release-metal-050 -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DSA3_BUILD_DIR=../sa3.cpp/build-plugin-metal-9511bbe \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DSA3_BUILD_DIR=../sa3.cpp/build-plugin-metal-v020 \
   -DSA3_REQUIRE_PRIVATE_GGML=ON
 cmake --build build-release-metal-050 --parallel 4 --target \
   SA3IPlug2Demo-vst3 SA3IPlug2Demo-app SA3ReaperExtension
