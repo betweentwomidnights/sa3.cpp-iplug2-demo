@@ -1,0 +1,231 @@
+# ABOUTME: Builds the Mac VST3, standalone and REAPER extension, and signs and notarizes them when it can.
+# ABOUTME: A dispatch without release_tag is a dry run; only an explicit tag uploads to a draft release.
+name: release-macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      sa3_cpp_tag:
+        description: sa3.cpp tag to build the runtime from; empty for the one set in this workflow
+        required: false
+        type: string
+      release_tag:
+        description: draft release to upload the zips to (e.g. v0.5.0); empty for a dry run
+        required: false
+        type: string
+  # A dry run of any change to how the release gets made. These never sign, whatever secrets exist.
+  pull_request:
+    paths:
+      - .github/workflows/release-macos.yml
+      - releases/*.sh
+      - cmake/**
+      - CMakeLists.txt
+      - SA3IPlug2Demo/CMakeLists.txt
+      - SA3IPlug2Demo/resources/*.plist
+      - SA3ReaperExtension/CMakeLists.txt
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macos-arm64 (metal)
+    runs-on: macos-15
+    timeout-minutes: 60
+    outputs:
+      artifact: ${{ steps.version.outputs.artifact }}
+    env:
+      SA3_CPP_TAG: ${{ inputs.sa3_cpp_tag || 'v0.2.0' }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      # Same as sa3.cpp's Mac release. CMakeLists.txt and the Info.plists have to agree, which the check enforces.
+      MIN_MACOS: '13.3'
+      # The SDK's downloader follows master unless told otherwise.
+      VST3_SDK_TAG: v3.8.0_build_66
+      # Whether the Developer ID and notary secrets exist, without exposing them to every step.
+      HAVE_SIGNING: ${{ github.event_name == 'workflow_dispatch' && secrets.MACOS_CERT_P12 != '' && secrets.APPLE_NOTARY_KEY_P8 != '' }}
+
+    steps:
+      - name: Require signing for a release
+        if: env.RELEASE_TAG != '' && env.HAVE_SIGNING != 'true'
+        run: |
+          echo "release uploads need the MACOS_CERT_* and APPLE_* secrets; see releases/MACOS_SIGNING.md"
+          exit 1
+
+      # Side by side, the layout the demo's CMake expects.
+      - name: Checkout the demo
+        uses: actions/checkout@v4
+        with:
+          path: demo
+          submodules: recursive
+
+      - name: Checkout sa3.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: betweentwomidnights/sa3.cpp
+          ref: refs/tags/${{ env.SA3_CPP_TAG }}
+          path: sa3.cpp
+          submodules: recursive
+
+      - name: Choose the version
+        id: version
+        run: |
+          version="$(plutil -extract CFBundleShortVersionString raw demo/SA3IPlug2Demo/resources/SA3IPlug2Demo-VST3-Info.plist)"
+          if [ -n "$RELEASE_TAG" ] && [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "release_tag $RELEASE_TAG does not match the bundles' version $version"
+            exit 1
+          fi
+          suffix="-unsigned"
+          [ "$HAVE_SIGNING" != true ] || suffix=""
+          echo "artifact=sa3-iplug2-demo-$version-macos-arm64$suffix" >> "$GITHUB_OUTPUT"
+          echo "demo $(git -C demo rev-parse --short HEAD), sa3.cpp $SA3_CPP_TAG, version $version, signing: $HAVE_SIGNING"
+
+      # CMake reads these on first configure, for both builds. The prefix map rewrites __FILE__ and debug info,
+      # and the -Werror stops the build if anything calls an API newer than MIN_MACOS without checking for it.
+      - name: Set the compiler flags
+        run: |
+          flags="-ffile-prefix-map=$GITHUB_WORKSPACE=. -Werror=unguarded-availability-new"
+          for var in CFLAGS CXXFLAGS OBJCFLAGS OBJCXXFLAGS; do
+            echo "$var=$flags" >> "$GITHUB_ENV"
+          done
+          echo "ASMFLAGS=-ffile-prefix-map=$GITHUB_WORKSPACE=." >> "$GITHUB_ENV"
+
+      - name: Download the VST3 SDK
+        working-directory: demo/vendor/iPlug2/Dependencies/IPlug
+        run: bash download-vst3-sdk.sh "$VST3_SDK_TAG"
+
+      - name: Build and test the sa3.cpp runtime
+        run: |
+          cmake -S sa3.cpp -B sa3.cpp/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$MIN_MACOS" \
+            -DSA3_METAL=ON -DGGML_NATIVE=OFF -DSA3_PRIVATE_GGML=ON -DSA3_BUILD_SAT=ON
+          cmake --build sa3.cpp/build --parallel 3
+          ctest --test-dir sa3.cpp/build --output-on-failure
+
+      - name: Build the demo
+        run: |
+          cmake -S demo -B demo/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$MIN_MACOS" \
+            -DSA3_BUILD_DIR="$GITHUB_WORKSPACE/sa3.cpp/build" \
+            -DSA3_REQUIRE_PRIVATE_GGML=ON -DSA3_EMBED_DEV_PATHS=OFF
+          cmake --build demo/build --parallel 3 \
+            --target SA3IPlug2Demo-vst3 SA3IPlug2Demo-app SA3ReaperExtension
+
+      # Move the build tree away first, so a bundle that still reaches back into it can't pass by doing so.
+      - name: Stage and check
+        run: |
+          demo/releases/stage-macos.sh demo/build sa3.cpp stage
+          mv sa3.cpp/build sa3.cpp/build-moved-away
+          demo/releases/check-macos-release.sh stage "$MIN_MACOS"
+
+      # The Developer ID identity goes into a throwaway keychain that only codesign may
+      # use, and the keychain and key files are deleted when the job ends.
+      - name: Import the Developer ID certificate
+        if: env.HAVE_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          keychain="$RUNNER_TEMP/sa3-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          identity="$(security find-identity -v -p codesigning "$keychain" | grep "Developer ID Application" | grep "($APPLE_TEAM_ID)" | head -1 | awk '{print $2}')"
+          [ -n "$identity" ] || { echo "no Developer ID Application identity for team $APPLE_TEAM_ID in the certificate"; exit 1; }
+          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          {
+            echo "SA3_SIGN_IDENTITY=$identity"
+            echo "SA3_NOTARY_KEY=$RUNNER_TEMP/notary.p8"
+            echo "SA3_NOTARY_KEY_ID=$APPLE_NOTARY_KEY_ID"
+            echo "SA3_NOTARY_ISSUER=$APPLE_NOTARY_ISSUER_ID"
+            echo "SIGNING_KEYCHAIN=$keychain"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign, notarize, staple and zip
+        run: |
+          if [ "$HAVE_SIGNING" = true ]; then
+            demo/releases/sign-and-notarize.sh --api-key stage "$SA3_SIGN_IDENTITY"
+          else
+            demo/releases/sign-and-notarize.sh --ad-hoc stage
+          fi
+
+      - name: Remove the signing keychain
+        if: always() && env.SIGNING_KEYCHAIN != ''
+        run: |
+          security delete-keychain "$SIGNING_KEYCHAIN" || true
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+      - name: Check the final zips
+        run: |
+          status=0
+          demo/releases/check-macos-release.sh stage/signed "$MIN_MACOS" > checks.txt 2>&1 || status=$?
+          cat checks.txt
+          cp checks.txt stage/signed/macos-checks.txt
+          exit "$status"
+
+      - name: Keep the zips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.artifact }}
+          path: stage/signed/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Explain how to test them
+        env:
+          ARTIFACT: ${{ steps.version.outputs.artifact }}
+        run: |
+          {
+            echo "### $ARTIFACT"
+            echo "Built from sa3.cpp \`$SA3_CPP_TAG\`."
+            echo
+            echo '```sh'
+            echo "gh run download $GITHUB_RUN_ID --repo $GITHUB_REPOSITORY -n $ARTIFACT"
+            if [ "$HAVE_SIGNING" != true ]; then
+              echo "# Signed ad hoc, not notarized. If you downloaded the artifact in a browser, also run:"
+              echo "# xattr -dr com.apple.quarantine <extracted folder>"
+            fi
+            echo '```'
+            echo
+            echo 'The VST3 goes in `~/Library/Audio/Plug-Ins/VST3`. The extension and its `SA3ReaperExtension` folder go in `~/Library/Application Support/REAPER/UserPlugins`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Apart from the build, so the job holding the signing secrets can't write to the repo and the one
+  # that can write never sees them.
+  publish:
+    name: upload to the draft release
+    needs: build
+    if: inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Download the zips
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: dist
+
+      - name: Upload to the draft release
+        run: |
+          is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+          if [ "$is_draft" != true ]; then
+            echo "$RELEASE_TAG is not a draft release, so nothing was uploaded"
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS-macos --clobber
