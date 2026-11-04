@@ -135,6 +135,11 @@ private:
   void SetDecoderLoraEnabled(bool enabled);
   void ChooseDecoderLora();
   void ClearDecoderLora();
+  void StartModelDownload(const std::string& variant);
+  void CancelModelDownload();
+  void StopModelDownload();
+  void SetModelDownloadStatus(const std::string& status);
+  std::string ModelDownloadStatus() const;
   void StartOrCancelDecoderLoraDownload();
   void DecoderLoraDownloadWorkerMain();
   void StopDecoderLoraDownload();
@@ -219,6 +224,13 @@ private:
   std::vector<CreativeLora> mCreativeLoras;
   int mSettingsRefreshTicks = 0;
 
+  std::thread mModelDownloadWorker;
+  std::atomic<bool> mModelDownloadBusy{false};
+  std::atomic<bool> mModelDownloadCancel{false};
+  std::atomic<uint64_t> mModelDownloadRevision{0};
+  uint64_t mSeenModelDownloadRevision = 0;
+  mutable std::mutex mModelDownloadStatusMutex;
+  std::string mModelDownloadStatus;
   std::thread mDecoderDownloadWorker;
   std::atomic<bool> mDecoderDownloadBusy{false};
   std::atomic<bool> mDecoderDownloadCancel{false};

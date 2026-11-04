@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -90,6 +92,20 @@ AsyncProcess StartProcess(const std::vector<std::string>& argv, std::string& err
 bool ProcessTryWait(AsyncProcess& proc, int* exitCode);   // true once exited (sets exitCode)
 void ProcessTerminate(AsyncProcess& proc);                // kill (cancel)
 void ProcessClose(AsyncProcess& proc);                    // release handle
+
+std::string HumanBytes(long long bytes);
+
+struct ModelDownloadResult
+{
+  bool complete = false;   // every file of the set is in place
+  std::string message;     // the final status to show, whatever the outcome
+};
+
+// Fetches the variant's F16 set into destDir, blocking until it ends, so call it off the UI and audio
+// threads. Resumes partial files and skips finished ones. `report` receives a status line and 0..1 progress.
+ModelDownloadResult DownloadModelSet(const std::string& destDir, const std::string& variant,
+                                     const std::atomic<bool>& cancel,
+                                     const std::function<void(const std::string&, float)>& report);
 
 AudioFileInfo SaveRecordingWav(const RecordingSnapshot& snapshot);
 AudioFileInfo SaveOutputWav(const RecordingSnapshot& snapshot);

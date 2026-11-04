@@ -210,6 +210,9 @@ seconds, and uses sa3.cpp's source splice for a clean transition. Each result is
 the SAME-L decoder LoRA, and loudness processing are shared with the VST3. Prompt, distribution shift, continuation
 length, seed lock, and last generated seed are stored in the REAPER project.
 
+The extension's settings page can download the `medium` or `small-music` GGUF file set or point at an existing folder,
+the same as the plugin's `models` button.
+
 Build and install it for the current Windows user with:
 
 ```powershell
